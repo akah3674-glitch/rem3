@@ -29,11 +29,17 @@ info() { echo -e "${B}  →${N}  $1"; }
 
 # ── Tiêu đề ──────────────────────────────────────
 banner() {
-    # Dùng cursor-home thay clear để không gây flash
     printf '\033[H\033[2J\033[3J'
+    # Kiểm tra server thật sự đang chạy không
+    local sv_label sv_color
+    if pgrep -f Srcgame.jar >/dev/null 2>&1 && pgrep -f ServerLogin.jar >/dev/null 2>&1; then
+        sv_label="  ONLINE  "; sv_color="${G}"
+    else
+        sv_label="  OFFLINE "; sv_color="${R}"
+    fi
     echo -e "${C}"
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║        NRO HASHIRAMA — OFFLINE           ║"
+    printf "  ║        NRO HASHIRAMA —${sv_color}%s${C}║\n" "$sv_label"
     echo "  ║     Private Server • Chơi 1 mình         ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${N}"
@@ -383,13 +389,28 @@ do_start() {
 
     start_db || { read -rp "  Enter..."; return; }
 
+    # Hàm chờ port mở (tối đa wait_sec giây)
+    wait_port() {
+        local port="$1" label="$2" wait_sec="${3:-15}"
+        local tries=0
+        while [ $tries -lt $wait_sec ]; do
+            if (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+                ok "$label ON (port $port)"
+                return 0
+            fi
+            sleep 1; tries=$((tries+1))
+        done
+        err "$label KHÔNG khởi động được sau ${wait_sec}s — xem log: $LOG/"
+        return 1
+    }
+
     # Login server
     if ! pgrep -f ServerLogin.jar >/dev/null 2>&1; then
         cd "$DIR/login" || true
         java -jar ServerLogin.jar > "$LOG/login.log" 2>&1 &
         disown
-        sleep 2
-        ok "Login server ON (port 8888)"
+        info "Chờ Login server (port 8888)..."
+        wait_port 8888 "Login server" 20 || true
     else
         warn "Login server đang chạy rồi"
     fi
@@ -399,8 +420,8 @@ do_start() {
         cd "$DIR/game" || true
         java -Xms128m -Xmx256m -jar Srcgame.jar > "$LOG/game.log" 2>&1 &
         disown
-        sleep 3
-        ok "Game server ON (port 14445)"
+        info "Chờ Game server (port 14445)..."
+        wait_port 14445 "Game server" 25 || true
     else
         warn "Game server đang chạy rồi"
     fi
@@ -467,6 +488,8 @@ do_log() {
 # ══════════════════════════════════════════════════
 _db()  { mysql -u root hashirama -e "$1" 2>/dev/null; }
 _dbq() { mysql -u root hashirama -Ne "$1" 2>/dev/null; }   # no header
+# _dbe: như _db nhưng in ra lỗi MySQL (dùng cho create/update quan trọng)
+_dbe() { mysql -u root hashirama -e "$1" 2>&1; }
 
 admin_give_thoi_vang() {
     echo ""
@@ -536,8 +559,15 @@ admin_menu() {
                 read -s -p "  Password: " p; echo ""
                 local h
                 h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
-                _db "INSERT INTO account (username, password) VALUES ('$u','$h');" \
-                    && ok "Tạo tài khoản '$u' OK!" || err "Thất bại (đã tồn tại?)"
+                # Dùng _dbe để lỗi SQL hiện rõ (trùng username, bảng sai, v.v.)
+                local result
+                result=$(_dbe "INSERT INTO account (username, password) VALUES ('$u','$h');")
+                if echo "$result" | grep -qi "error\|ERROR"; then
+                    err "Tạo tài khoản thất bại:"
+                    echo "$result"
+                else
+                    ok "Tạo tài khoản '$u' OK!"
+                fi
                 read -rp "  [Enter]..."
                 ;;
             5)
