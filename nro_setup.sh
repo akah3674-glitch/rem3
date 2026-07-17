@@ -169,54 +169,104 @@ step_download_apk() {
   local apk_raw="/tmp/nro_original.apk"
   local success=0
 
+  rm -f "$apk_raw" 2>/dev/null || true
+
   inf "Tải APK từ Google Drive (ID: $GDRIVE_ID)..."
 
-  # Thử gdown
-  if python3 -c "import gdown" 2>/dev/null; then
-    inf "Dùng gdown..."
-    python3 -c "
-import gdown, sys
+  # ── Method 1: gdown (update lên mới nhất trước) ──
+  inf "[1/4] Thử gdown..."
+  pip3 install -q -U gdown 2>/dev/null || true
+  python3 - << PYEOF 2>&1 && success=1 || true
+import sys
 try:
-    gdown.download(id='$GDRIVE_ID', output='$apk_raw', quiet=False, fuzzy=True)
-    print('GDOWN_OK')
+    import gdown
+    out = gdown.download(
+        id="$GDRIVE_ID",
+        output="$apk_raw",
+        quiet=False,
+        fuzzy=True,
+        use_cookies=False
+    )
+    if out:
+        print("gdown OK:", out)
+    else:
+        print("gdown trả về None")
+        sys.exit(1)
 except Exception as e:
-    print('GDOWN_ERR:', e)
+    print("gdown lỗi:", e)
     sys.exit(1)
-" && success=1 || true
-  fi
+PYEOF
 
-  # Fallback: curl trực tiếp
+  _apk_check "$apk_raw" && success=1 || success=0
+
+  # ── Method 2: curl với confirm token ──
   if [[ $success -eq 0 ]]; then
-    wrn "gdown thất bại, thử curl..."
-    local CFILE="/tmp/gdrive_c.txt"
+    inf "[2/4] Thử curl + confirm token..."
+    local CFILE="/tmp/gdrive_cookie.txt"
+    rm -f "$CFILE" 2>/dev/null || true
 
-    # Lấy confirm token
-    curl -sc "$CFILE" \
+    curl -sc "$CFILE" -A "Mozilla/5.0" \
       "https://drive.google.com/uc?export=download&id=$GDRIVE_ID" \
-      -o /tmp/gd_check.html 2>/dev/null || true
+      -o /tmp/gd_page.html 2>/dev/null || true
 
     local CONFIRM
-    CONFIRM=$(grep -oP '(?<=confirm=)[^&"]+' /tmp/gd_check.html 2>/dev/null | head -1 || echo "t")
+    CONFIRM=$(grep -oP '(?<=confirm=)[^&"&amp;]+' /tmp/gd_page.html 2>/dev/null | head -1)
+    [[ -z "$CONFIRM" ]] && CONFIRM=$(grep -oP 'confirm=([^&"]+)' /tmp/gd_page.html 2>/dev/null | head -1 | cut -d= -f2)
     [[ -z "$CONFIRM" ]] && CONFIRM="t"
 
-    inf "Confirm token: $CONFIRM"
-    curl -Lb "$CFILE" \
+    inf "  Confirm: $CONFIRM"
+    curl -Lb "$CFILE" -A "Mozilla/5.0" \
       "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=$GDRIVE_ID" \
-      --progress-bar -o "$apk_raw" 2>&1 || true
+      --progress-bar -o "$apk_raw" 2>/dev/null || true
 
-    [[ -f "$apk_raw" ]] && [[ $(stat -c%s "$apk_raw" 2>/dev/null || echo 0) -gt 100000 ]] && success=1
+    _apk_check "$apk_raw" && success=1
   fi
 
-  if [[ $success -eq 0 ]] || [[ ! -f "$apk_raw" ]]; then
-    err "Tải APK thất bại!"
-    wrn "Kiểm tra kết nối mạng và thử lại."
+  # ── Method 3: drive.usercontent.google.com ──
+  if [[ $success -eq 0 ]]; then
+    inf "[3/4] Thử drive.usercontent.google.com..."
+    curl -L -A "Mozilla/5.0" \
+      "https://drive.usercontent.google.com/download?id=$GDRIVE_ID&export=download&authuser=0&confirm=t" \
+      --progress-bar -o "$apk_raw" 2>/dev/null || true
+
+    _apk_check "$apk_raw" && success=1
+  fi
+
+  # ── Method 4: wget ──
+  if [[ $success -eq 0 ]]; then
+    inf "[4/4] Thử wget..."
+    wget -q --show-progress --no-check-certificate \
+      --user-agent="Mozilla/5.0" \
+      "https://drive.usercontent.google.com/download?id=$GDRIVE_ID&export=download&confirm=t" \
+      -O "$apk_raw" 2>/dev/null || true
+
+    _apk_check "$apk_raw" && success=1
+  fi
+
+  if [[ $success -eq 0 ]]; then
+    err "Tất cả 4 method đều thất bại!"
+    wrn "File Drive có thể bị giới hạn tải. Thử:"
+    echo "  1. Mở link Drive → Share → Anyone with link"
+    echo "  2. Tải APK thủ công vào /tmp/nro_original.apk rồi chạy lại"
     return 1
   fi
 
-  local sz
-  sz=$(du -h "$apk_raw" 2>/dev/null | cut -f1)
+  local sz; sz=$(du -h "$apk_raw" 2>/dev/null | cut -f1)
   ok "APK tải xong: $sz"
   echo "$apk_raw"
+}
+
+# Kiểm tra file APK hợp lệ (>= 1MB và có magic bytes PK)
+_apk_check() {
+  local f="$1"
+  [[ ! -f "$f" ]] && return 1
+  local sz; sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+  [[ "$sz" -lt 1000000 ]] && { wrn "  File quá nhỏ: ${sz} bytes (có thể là trang lỗi)"; return 1; }
+  # APK/ZIP bắt đầu bằng PK (0x504B)
+  local magic; magic=$(xxd -l 2 "$f" 2>/dev/null | awk '{print $2$3}' | head -1)
+  [[ "$magic" == "504b" ]] && return 0
+  wrn "  File không phải APK/ZIP (magic: $magic)"
+  return 1
 }
 
 # ══════════════════════════════════════════════════════════════════
