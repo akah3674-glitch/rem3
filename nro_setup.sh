@@ -107,6 +107,44 @@ except Exception as e:
 PY
 }
 
+# ── Copy APK sang sdcard/Download ────────────────
+copy_apk_sdcard() {
+    local src="$1"
+    local dst_name="Hashirama-NRO.apk"
+    local dst=""
+
+    # Thử các đường dẫn sdcard phổ biến trên Android/Termux
+    for candidate in \
+        "$HOME/storage/downloads/$dst_name" \
+        "/sdcard/Download/$dst_name" \
+        "/storage/emulated/0/Download/$dst_name"
+    do
+        local dir; dir=$(dirname "$candidate")
+        if [ -d "$dir" ]; then
+            dst="$candidate"
+            break
+        fi
+    done
+
+    if [ -n "$dst" ]; then
+        cp "$src" "$dst" 2>/dev/null \
+            && ok "APK đã copy → ${Y}$dst${N}" \
+            || warn "Copy sdcard thất bại — cài từ: $src"
+    else
+        # sdcard chưa mount → chạy termux-setup-storage
+        warn "Chưa cấp quyền lưu trữ. Cấp quyền rồi thử lại..."
+        termux-setup-storage 2>/dev/null
+        sleep 3
+        if [ -d "$HOME/storage/downloads" ]; then
+            cp "$src" "$HOME/storage/downloads/$dst_name" 2>/dev/null \
+                && ok "APK đã copy → ${Y}$HOME/storage/downloads/$dst_name${N}" \
+                || warn "Vẫn thất bại — cài từ: $src"
+        else
+            warn "Cài trực tiếp từ: $src"
+        fi
+    fi
+}
+
 # ── Sign APK bằng debug key ──────────────────────
 sign_apk() {
     local apk="$1"
@@ -268,6 +306,9 @@ do_full_setup() {
     fi
     sign_apk "$APK_OUT"
     rm -f "$apk_raw" "$apk_patched"
+
+    # Copy APK sang sdcard/Download để dễ cài
+    copy_apk_sdcard "$APK_OUT"
 
     # Bước 3: Tải JARs + SQL
     echo ""
