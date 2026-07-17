@@ -2,7 +2,7 @@
 # ╔══════════════════════════════════════════════╗
 # ║   NRO HASHIRAMA — Auto Setup + Control Panel ║
 # ║   Chơi offline 1 mình trên điện thoại        ║
-# ║   v2.0 – Tải từ GitHub (~165MB, không RAR)   ║
+# ║   v2.2 – Tải từ GitHub (~165MB, không RAR)   ║
 # ╚══════════════════════════════════════════════╝
 
 DIR="$HOME/nro"
@@ -12,7 +12,7 @@ LOGIN_JAR="$DIR/login/ServerLogin.jar"
 APK_OUT="$DIR/Hashirama.apk"
 SETUP_FLAG="$DIR/.setup_done"
 
-# GitHub Release URLs (~165MB total, không cần tải RAR 2.2GB)
+# GitHub Release URLs (~165MB total)
 GH_BASE="https://github.com/akah3674-glitch/rem3/releases/download/nro-v1.0"
 URL_APK="$GH_BASE/Hashirama-Androi.apk"
 URL_GAME="$GH_BASE/Srcgame.jar"
@@ -54,13 +54,56 @@ download_file() {
     info "Tải $label..."
     wget -q --show-progress -c -O "$out" "$url" 2>&1
     if [ -s "$out" ]; then
-        ok "$label: $(du -sh $out | cut -f1)"
+        ok "$label: $(du -sh "$out" | cut -f1)"
         return 0
     else
         err "Tải $label thất bại!"
         rm -f "$out"
         return 1
     fi
+}
+
+# ── Patch APK: thay IP → 127.0.0.1 ──────────────
+patch_apk() {
+    local src="$1" dst="$2"
+    info "Patch IP server → 127.0.0.1 ..."
+    python3 - "$src" "$dst" <<'PY'
+import sys, zipfile, shutil
+
+src, dst = sys.argv[1], sys.argv[2]
+META = 'assets/bin/Data/Managed/Metadata/global-metadata.dat'
+OLD  = b'gatewayhashirama.nroacademy.online'   # 35 bytes
+NEW  = b'127.0.0.1' + b'\x00' * (len(OLD) - len(b'127.0.0.1'))
+
+try:
+    with zipfile.ZipFile(src, 'r') as zin:
+        if META not in zin.namelist():
+            print("[!] Không tìm thấy metadata, copy thẳng")
+            shutil.copy2(src, dst)
+            sys.exit(0)
+        meta = zin.read(META)
+
+    if OLD in meta:
+        meta_new = meta.replace(OLD, NEW, 1)
+        print("[✓] Đã thay IP gatewayhashirama.nroacademy.online → 127.0.0.1")
+    else:
+        meta_new = meta
+        print("[!] Không tìm thấy IP cũ (có thể đã patch rồi)")
+
+    with zipfile.ZipFile(src, 'r') as zin, \
+         zipfile.ZipFile(dst, 'w', zipfile.ZIP_STORED, allowZip64=True) as zout:
+        for item in zin.infolist():
+            if item.filename.startswith('META-INF/'):
+                continue
+            data = meta_new if item.filename == META else zin.read(item.filename)
+            info = zipfile.ZipInfo(item.filename)
+            zout.writestr(info, data)
+    print(f"[✓] APK patched → {dst}")
+
+except Exception as e:
+    print(f"[✗] Lỗi patch: {e}")
+    shutil.copy2(src, dst)
+PY
 }
 
 # ── Sign APK bằng debug key ──────────────────────
@@ -98,7 +141,10 @@ start_db() {
     fi
     info "Khởi động MariaDB..."
     [ ! -d "$PREFIX/var/lib/mysql/mysql" ] && mysql_install_db >/dev/null 2>&1
-    mysqld_safe --datadir="$PREFIX/var/lib/mysql" >/dev/null 2>&1 &
+    mysqld_safe --datadir="$PREFIX/var/lib/mysql" \
+        --socket="$PREFIX/tmp/mysql.sock" \
+        --pid-file="$PREFIX/tmp/mysqld.pid" \
+        >/dev/null 2>&1 &
     disown
     local tries=0
     while ! mysqladmin ping -u root --silent 2>/dev/null; do
@@ -124,7 +170,9 @@ SQL
         local sql_file="$DIR/nro_hashirama.sql"
         if [ -f "$sql_file" ]; then
             info "Import dữ liệu game (~8MB)..."
-            mysql -u root hashirama < "$sql_file" 2>/dev/null && ok "SQL import OK" || warn "SQL import có lỗi nhỏ (bỏ qua)"
+            mysql -u root hashirama < "$sql_file" 2>/dev/null \
+                && ok "SQL import OK ($(mysql -u root hashirama -e 'SHOW TABLES;' 2>/dev/null | wc -l) bảng)" \
+                || warn "SQL import có lỗi nhỏ (bỏ qua)"
         fi
     else
         ok "DB đã có dữ liệu ($((tables-1)) bảng)"
@@ -181,13 +229,13 @@ do_full_setup() {
     echo -e "  ${C}════ FULL SETUP — Tải ~165MB từ GitHub ════${N}"
     echo ""
     echo -e "  ${W}Bước 1/4:${N} Cài Java + MariaDB"
-    echo -e "  ${W}Bước 2/4:${N} Tải APK game (129MB)"
+    echo -e "  ${W}Bước 2/4:${N} Tải APK game (129MB) + patch IP"
     echo -e "  ${W}Bước 3/4:${N} Tải Server JARs + SQL (36MB)"
     echo -e "  ${W}Bước 4/4:${N} Cài MariaDB + import dữ liệu"
     echo ""
-    echo -e "  ${Y}Tổng: ~165MB (thay vì 2.2GB)${N}"
+    echo -e "  ${Y}Tổng: ~165MB (thay vì 2.2GB RAR)${N}"
     echo ""
-    read -p "  Nhấn Enter để bắt đầu..."
+    read -rp "  Nhấn Enter để bắt đầu..."
     echo ""
 
     mkdir -p "$DIR/game" "$DIR/login" "$LOG"
@@ -196,76 +244,50 @@ do_full_setup() {
     echo -e "${W}  ─── BƯỚC 1/4: Cài packages ───${N}"
     install_env
 
-    # Bước 2: Tải APK
+    # Bước 2: Tải + patch + sign APK
     echo ""
     echo -e "${W}  ─── BƯỚC 2/4: Tải APK game (129MB) ───${N}"
     local apk_raw="$DIR/Hashirama-orig.apk"
+    local apk_patched="$DIR/Hashirama-patched.apk"
+
     if [ ! -s "$apk_raw" ]; then
-        download_file "$URL_APK" "$apk_raw" "APK Hashirama" || { err "Không tải được APK!"; read -p "  Enter..."; return; }
+        download_file "$URL_APK" "$apk_raw" "APK Hashirama" \
+            || { err "Không tải được APK!"; read -rp "  Enter..."; return; }
     else
-        ok "APK đã có ($(du -sh $apk_raw | cut -f1))"
+        ok "APK đã có ($(du -sh "$apk_raw" | cut -f1))"
     fi
 
-    # Patch IP → 127.0.0.1
-    info "Patch IP server → 127.0.0.1 ..."
-    local apk_patched="$DIR/Hashirama-patched.apk"
-    python3 - "$apk_raw" "$apk_patched" <<'PY'
-import sys, zipfile, os
-src, dst = sys.argv[1], sys.argv[2]
-META = 'assets/bin/Data/Managed/Metadata/global-metadata.dat'
-OLD  = b'gatewayhashirama.nroacademy.online'   # 35 bytes
-NEW  = b'127.0.0.1' + b'\x00' * (len(OLD) - len(b'127.0.0.1'))
-
-with zipfile.ZipFile(src, 'r') as zin:
-    if META not in zin.namelist():
-        print("[!] Không tìm thấy metadata, copy thẳng")
-        import shutil; shutil.copy2(src, dst); sys.exit(0)
-    meta = zin.read(META)
-
-if OLD in meta:
-    meta_new = meta.replace(OLD, NEW, 1)
-    print(f"[✓] Đã thay IP: {OLD.rstrip(b'chr(0)')} → 127.0.0.1")
-else:
-    meta_new = meta
-    print("[!] Không tìm thấy IP cũ (có thể đã patch)")
-
-with zipfile.ZipFile(src,'r') as zin, \
-     zipfile.ZipFile(dst,'w',zipfile.ZIP_STORED,allowZip64=True) as zout:
-    for item in zin.infolist():
-        if item.filename.startswith('META-INF/'): continue
-        data = meta_new if item.filename == META else zin.read(item.filename)
-        zout.writestr(zipfile.ZipInfo(item.filename), data)
-print(f"[✓] APK patched: {dst}")
-PY
-
+    patch_apk "$apk_raw" "$apk_patched"
     if [ -s "$apk_patched" ]; then
-        cp "$apk_patched" "$APK_OUT"
-        rm -f "$apk_patched"
+        mv "$apk_patched" "$APK_OUT"
         ok "Patch IP OK"
     else
-        warn "Patch thất bại, dùng APK gốc"
+        warn "Patch lỗi, dùng APK gốc"
         cp "$apk_raw" "$APK_OUT"
     fi
-
-    # Sign APK
     sign_apk "$APK_OUT"
-    rm -f "$apk_raw"
+    rm -f "$apk_raw" "$apk_patched"
 
     # Bước 3: Tải JARs + SQL
     echo ""
     echo -e "${W}  ─── BƯỚC 3/4: Tải Server JARs + SQL (36MB) ───${N}"
-    [ ! -s "$GAME_JAR" ]  && download_file "$URL_GAME"  "$GAME_JAR"  "Srcgame.jar"     || ok "Srcgame.jar đã có"
-    [ ! -s "$LOGIN_JAR" ] && download_file "$URL_LOGIN" "$LOGIN_JAR" "ServerLogin.jar" || ok "ServerLogin.jar đã có"
-    [ ! -s "$DIR/nro_hashirama.sql" ] && download_file "$URL_SQL" "$DIR/nro_hashirama.sql" "SQL database" || ok "SQL đã có"
+    [ ! -s "$GAME_JAR" ]  \
+        && download_file "$URL_GAME"  "$GAME_JAR"  "Srcgame.jar" \
+        || ok "Srcgame.jar đã có"
+    [ ! -s "$LOGIN_JAR" ] \
+        && download_file "$URL_LOGIN" "$LOGIN_JAR" "ServerLogin.jar" \
+        || ok "ServerLogin.jar đã có"
+    [ ! -s "$DIR/nro_hashirama.sql" ] \
+        && download_file "$URL_SQL" "$DIR/nro_hashirama.sql" "SQL database" \
+        || ok "SQL đã có"
 
     # Bước 4: DB + config
     echo ""
     echo -e "${W}  ─── BƯỚC 4/4: Cài MariaDB + import dữ liệu ───${N}"
-    start_db || { read -p "  Enter..."; return; }
+    start_db || { read -rp "  Enter..."; return; }
     init_db
     write_configs
 
-    # Done
     touch "$SETUP_FLAG"
     echo ""
     echo -e "  ${G}══════════════════════════════════════${N}"
@@ -273,9 +295,9 @@ PY
     echo -e "  ${G}══════════════════════════════════════${N}"
     echo ""
     echo -e "  ${W}APK cài game:${N}  ${Y}$APK_OUT${N}"
-    echo -e "  ${W}Bước tiếp:${N}     Chọn [2] Bật server, rồi cài APK"
+    echo -e "  ${W}Bước tiếp:${N}     [2] Bật server → cài APK → chơi!"
     echo ""
-    read -p "  Nhấn Enter để về menu..."
+    read -rp "  Nhấn Enter để về menu..."
 }
 
 do_start() {
@@ -283,15 +305,14 @@ do_start() {
     echo -e "  ${C}════ BẬT SERVER ════${N}"
     echo ""
 
-    [ ! -f "$GAME_JAR" ]  && { err "Thiếu Srcgame.jar — chạy [1] Setup trước"; read -p "  Enter..."; return; }
-    [ ! -f "$LOGIN_JAR" ] && { err "Thiếu ServerLogin.jar — chạy [1] Setup trước"; read -p "  Enter..."; return; }
+    [ ! -f "$GAME_JAR" ]  && { err "Thiếu Srcgame.jar — chạy [1] Setup trước";  read -rp "  Enter..."; return; }
+    [ ! -f "$LOGIN_JAR" ] && { err "Thiếu ServerLogin.jar — chạy [1] Setup trước"; read -rp "  Enter..."; return; }
 
-    start_db || { read -p "  Enter..."; return; }
-    init_db
+    start_db || { read -rp "  Enter..."; return; }
 
     # Login server
     if ! pgrep -f ServerLogin.jar >/dev/null 2>&1; then
-        cd "$DIR/login"
+        cd "$DIR/login" || true
         java -jar ServerLogin.jar > "$LOG/login.log" 2>&1 &
         disown
         sleep 2
@@ -302,7 +323,7 @@ do_start() {
 
     # Game server
     if ! pgrep -f Srcgame.jar >/dev/null 2>&1; then
-        cd "$DIR/game"
+        cd "$DIR/game" || true
         java -Xms128m -Xmx256m -jar Srcgame.jar > "$LOG/game.log" 2>&1 &
         disown
         sleep 3
@@ -314,18 +335,18 @@ do_start() {
     echo ""
     echo -e "  ${W}★ Mở game Hashirama → đăng ký → chơi!${N}"
     echo ""
-    read -p "  Nhấn Enter..."
+    read -rp "  Nhấn Enter..."
 }
 
 do_stop() {
     banner
     echo -e "  ${C}════ TẮT SERVER ════${N}"
     echo ""
-    pkill -f Srcgame.jar     2>/dev/null && ok "Game server OFF"     || warn "Game server chưa chạy"
-    pkill -f ServerLogin.jar 2>/dev/null && ok "Login server OFF"    || warn "Login server chưa chạy"
-    mysqladmin shutdown -u root 2>/dev/null && ok "MariaDB OFF" || warn "MariaDB chưa chạy"
+    pkill -f Srcgame.jar     2>/dev/null && ok "Game server OFF"  || warn "Game server chưa chạy"
+    pkill -f ServerLogin.jar 2>/dev/null && ok "Login server OFF" || warn "Login server chưa chạy"
+    mysqladmin shutdown -u root 2>/dev/null && ok "MariaDB OFF"   || warn "MariaDB chưa chạy"
     echo ""
-    read -p "  Nhấn Enter..."
+    read -rp "  Nhấn Enter..."
 }
 
 do_status() {
@@ -333,33 +354,23 @@ do_status() {
     echo -e "  ${C}════ TRẠNG THÁI ════${N}"
     echo ""
 
-    if mysqladmin ping -u root --silent 2>/dev/null; then
-        ok "MariaDB: ĐANG CHẠY"
-    else
-        err "MariaDB: TẮT"
-    fi
-
-    if pgrep -f ServerLogin.jar >/dev/null 2>&1; then
-        ok "Login server: ĐANG CHẠY (port 8888)"
-    else
-        err "Login server: TẮT"
-    fi
-
-    if pgrep -f Srcgame.jar >/dev/null 2>&1; then
-        ok "Game server: ĐANG CHẠY (port 14445)"
-    else
-        err "Game server: TẮT"
-    fi
+    mysqladmin ping -u root --silent 2>/dev/null \
+        && ok "MariaDB: ĐANG CHẠY" || err "MariaDB: TẮT"
+    pgrep -f ServerLogin.jar >/dev/null 2>&1 \
+        && ok "Login server: ĐANG CHẠY (port 8888)" || err "Login server: TẮT"
+    pgrep -f Srcgame.jar >/dev/null 2>&1 \
+        && ok "Game server: ĐANG CHẠY (port 14445)" || err "Game server: TẮT"
 
     echo ""
-    [ -f "$APK_OUT" ] && ok "APK: $APK_OUT ($(du -sh $APK_OUT | cut -f1))" \
-                      || warn "APK: chưa có (cần chạy [1] Setup)"
+    [ -f "$APK_OUT" ] \
+        && ok "APK: $APK_OUT ($(du -sh "$APK_OUT" | cut -f1))" \
+        || warn "APK: chưa có (cần chạy [1] Setup)"
 
     echo ""
     echo -e "  ${C}── Log game (10 dòng cuối) ──${N}"
     [ -f "$LOG/game.log" ] && tail -10 "$LOG/game.log" || echo "  (chưa có log)"
     echo ""
-    read -p "  Nhấn Enter..."
+    read -rp "  Nhấn Enter..."
 }
 
 do_log() {
@@ -367,27 +378,53 @@ do_log() {
     echo -e "  ${C}════ XEM LOG LIVE ════${N}"
     echo -e "  ${Y}Ctrl+C để thoát${N}"
     echo ""
-    [ -f "$LOG/game.log" ] && tail -f "$LOG/game.log" || { warn "Chưa có log game"; read -p "  Enter..."; }
+    if [ -f "$LOG/game.log" ]; then
+        tail -f "$LOG/game.log"
+    else
+        warn "Chưa có log game"
+        read -rp "  Enter..."
+    fi
 }
 
-# ── ADMIN TOOL ───────────────────────────────────
-_db() { mysql -u root hashirama -e "$1" 2>/dev/null; }
+# ══════════════════════════════════════════════════
+# ADMIN TOOL
+# ── Schema thực tế (SQL nrofree2025):
+#    account : id, username, password, ban (0=OK 1=banned)
+#    player  : id, account_id, name, power, thoi_vang, ...
+# ══════════════════════════════════════════════════
+_db()  { mysql -u root hashirama -e "$1" 2>/dev/null; }
+_dbq() { mysql -u root hashirama -Ne "$1" 2>/dev/null; }   # no header
 
-admin_give() {
-    local col="$1" label="$2"
+admin_give_thoi_vang() {
     echo ""
-    read -p "  Tên nhân vật: " cname
-    read -p "  Số $label: " amount
+    read -rp "  Tên nhân vật: " cname
+    read -rp "  Số thỏi vàng nạp: " amount
     local exist
-    exist=$(_db "SELECT COUNT(*) FROM nro_nhan_vat WHERE name='$cname';" | tail -1)
+    exist=$(_dbq "SELECT COUNT(*) FROM player WHERE name='$cname';")
     if [ "$exist" = "0" ] || [ -z "$exist" ]; then
-        err "Không tìm thấy '$cname'!"
+        err "Không tìm thấy nhân vật '$cname'!"
     else
-        _db "UPDATE nro_nhan_vat SET $col=$col+$amount WHERE name='$cname';" && \
-            ok "Đã nạp $amount $label cho '$cname'!" || err "Thất bại!"
-        _db "SELECT name, level, vang, ngoc FROM nro_nhan_vat WHERE name='$cname';"
+        _db "UPDATE player SET thoi_vang = thoi_vang + $amount WHERE name='$cname';" \
+            && ok "Đã nạp $amount thỏi vàng cho '$cname'!" || err "Thất bại!"
+        _db "SELECT name, power, thoi_vang FROM player WHERE name='$cname';"
     fi
-    read -p "  [Enter]..."
+    read -rp "  [Enter]..."
+}
+
+admin_give_power() {
+    echo ""
+    read -rp "  Tên nhân vật: " cname
+    read -rp "  Power thêm vào: " amount
+    local exist
+    exist=$(_dbq "SELECT COUNT(*) FROM player WHERE name='$cname';")
+    if [ "$exist" = "0" ] || [ -z "$exist" ]; then
+        err "Không tìm thấy nhân vật '$cname'!"
+    else
+        _db "UPDATE player SET power = power + $amount WHERE name='$cname';" \
+            && ok "Đã tăng $amount power cho '$cname'!" || err "Thất bại!"
+        _db "SELECT name, power, thoi_vang FROM player WHERE name='$cname';"
+    fi
+    read -rp "  [Enter]..."
 }
 
 admin_menu() {
@@ -397,61 +434,69 @@ admin_menu() {
         echo ""
         mysqladmin ping -u root --silent 2>/dev/null \
             && echo -e "  ${G}● DB: Online${N}" \
-            || echo -e "  ${R}● DB: Offline (chạy [2] Bật server)${N}"
+            || echo -e "  ${R}● DB: Offline — chạy [2] Bật server trước${N}"
         echo ""
-        echo -e "  ${Y}[1]${N} Nạp VÀNG"
-        echo -e "  ${Y}[2]${N} Nạp NGỌC"
-        echo -e "  ${Y}[3]${N} Nạp EXP"
-        echo -e "  ${Y}[4]${N} Danh sách nhân vật"
-        echo -e "  ${Y}[5]${N} Tạo tài khoản"
-        echo -e "  ${Y}[6]${N} Reset mật khẩu"
-        echo -e "  ${Y}[7]${N} Ban / Unban"
-        echo -e "  ${Y}[8]${N} SQL tuỳ ý"
+        echo -e "  ${Y}[1]${N} Nạp Thỏi Vàng (thoi_vang)"
+        echo -e "  ${Y}[2]${N} Tăng Power"
+        echo -e "  ${Y}[3]${N} Danh sách nhân vật (top power)"
+        echo -e "  ${Y}[4]${N} Tạo tài khoản"
+        echo -e "  ${Y}[5]${N} Reset mật khẩu"
+        echo -e "  ${Y}[6]${N} Ban / Unban"
+        echo -e "  ${Y}[7]${N} SQL tuỳ ý"
         echo -e "  ${Y}[0]${N} Quay lại"
         echo ""
         read -r -p "  Chọn: " ch
         case "$ch" in
-            1) admin_give "vang" "vàng" ;;
-            2) admin_give "ngoc" "ngọc" ;;
-            3) admin_give "exp"  "EXP"  ;;
+            1) admin_give_thoi_vang ;;
+            2) admin_give_power ;;
+            3)
+                echo ""
+                _db "SELECT p.name, p.power, p.thoi_vang, a.username
+                     FROM player p
+                     LEFT JOIN account a ON p.account_id = a.id
+                     ORDER BY p.power DESC LIMIT 20;"
+                read -rp "  [Enter]..."
+                ;;
             4)
                 echo ""
-                _db "SELECT name, level, vang, ngoc, exp FROM nro_nhan_vat ORDER BY level DESC LIMIT 30;"
-                read -p "  [Enter]..."
+                read -rp "  Username: " u
+                read -s -p "  Password: " p; echo ""
+                local h
+                h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
+                _db "INSERT INTO account (username, password) VALUES ('$u','$h');" \
+                    && ok "Tạo tài khoản '$u' OK!" || err "Thất bại (đã tồn tại?)"
+                read -rp "  [Enter]..."
                 ;;
             5)
                 echo ""
-                read -p "  Username: " u
-                read -s -p "  Password: " p; echo ""
-                local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
-                _db "INSERT INTO account (username, password) VALUES ('$u','$h');" && \
-                    ok "Tạo tài khoản '$u' OK!" || err "Thất bại (đã tồn tại?)"
-                read -p "  [Enter]..."
+                read -rp "  Username: " u
+                read -s -p "  Pass mới: " p; echo ""
+                local h
+                h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
+                _db "UPDATE account SET password='$h' WHERE username='$u';" \
+                    && ok "Đổi pass '$u' OK!" || err "Thất bại!"
+                read -rp "  [Enter]..."
                 ;;
             6)
                 echo ""
-                read -p "  Username: " u
-                read -s -p "  Pass mới: " p; echo ""
-                local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
-                _db "UPDATE account SET password='$h' WHERE username='$u';" && ok "OK!" || err "Thất bại!"
-                read -p "  [Enter]..."
+                read -rp "  Username: " u
+                echo -e "  ${Y}[1]${N} Ban  ${Y}[2]${N} Unban"
+                read -r -p "  Chọn: " bc
+                if [ "$bc" = "1" ]; then
+                    _db "UPDATE account SET ban=1 WHERE username='$u';" && ok "Đã ban '$u'"
+                elif [ "$bc" = "2" ]; then
+                    _db "UPDATE account SET ban=0 WHERE username='$u';" && ok "Đã unban '$u'"
+                fi
+                read -rp "  [Enter]..."
                 ;;
             7)
                 echo ""
-                read -p "  Username: " u
-                echo -e "  ${Y}[1]${N} Ban  ${Y}[2]${N} Unban"
-                read -r -p "  Chọn: " bc
-                [[ "$bc" == "1" ]] && _db "UPDATE account SET status=0 WHERE username='$u';" && ok "Đã ban '$u'" || true
-                [[ "$bc" == "2" ]] && _db "UPDATE account SET status=1 WHERE username='$u';" && ok "Đã unban '$u'" || true
-                read -p "  [Enter]..."
-                ;;
-            8)
-                echo ""
+                echo -e "  ${C}Tables:${N}"
                 _db "SHOW TABLES;"
                 echo ""
-                read -p "  SQL: " sql
+                read -rp "  SQL: " sql
                 [[ -n "$sql" ]] && _db "$sql"
-                read -p "  [Enter]..."
+                read -rp "  [Enter]..."
                 ;;
             0) break ;;
         esac
@@ -462,8 +507,8 @@ do_reset_data() {
     banner
     echo -e "  ${C}════ XOÁ DỮ LIỆU ════${N}"
     echo ""
-    warn "Xoá toàn bộ tài khoản và nhân vật?"
-    read -p "  Gõ 'yes' để xác nhận: " confirm
+    warn "Xoá toàn bộ dữ liệu game (account + nhân vật)?"
+    read -rp "  Gõ 'yes' để xác nhận: " confirm
     if [ "$confirm" = "yes" ]; then
         mysqladmin ping -u root --silent 2>/dev/null || start_db
         mysql -u root 2>/dev/null <<SQL
@@ -472,12 +517,14 @@ CREATE DATABASE hashirama CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 GRANT ALL PRIVILEGES ON hashirama.* TO 'root'@'localhost';
 FLUSH PRIVILEGES;
 SQL
-        # Import lại SQL
-        [ -f "$DIR/nro_hashirama.sql" ] && mysql -u root hashirama < "$DIR/nro_hashirama.sql" 2>/dev/null && ok "DB reset + import lại OK" || ok "DB reset OK"
+        [ -f "$DIR/nro_hashirama.sql" ] \
+            && mysql -u root hashirama < "$DIR/nro_hashirama.sql" 2>/dev/null \
+            && ok "DB reset + import lại OK" \
+            || ok "DB reset OK (không có SQL file)"
     else
         warn "Huỷ"
     fi
-    read -p "  Nhấn Enter..."
+    read -rp "  Nhấn Enter..."
 }
 
 # ══════════════════════════════════════════════════
@@ -489,7 +536,10 @@ main_menu() {
         status_bar
 
         if [ -f "$SETUP_FLAG" ]; then
-            echo -e "  ${G}[✓] Đã setup${N}  •  JAR: $([ -f "$GAME_JAR" ] && echo OK || echo THIẾU)  •  APK: $([ -f "$APK_OUT" ] && echo OK || echo THIẾU)"
+            local jar_ok apk_ok
+            [ -f "$GAME_JAR" ]  && jar_ok="${G}OK${N}" || jar_ok="${R}THIẾU${N}"
+            [ -f "$APK_OUT" ]   && apk_ok="${G}OK${N}" || apk_ok="${R}THIẾU${N}"
+            echo -e "  JAR: $jar_ok  •  APK: $apk_ok"
             echo ""
         fi
 
@@ -498,7 +548,7 @@ main_menu() {
         echo -e "  ${W}[3]${N} ■   Tắt server"
         echo -e "  ${W}[4]${N} 📊  Trạng thái"
         echo -e "  ${W}[5]${N} 📜  Xem log live"
-        echo -e "  ${W}[6]${N} 👑  Admin tool (vàng/ngọc/ban...)"
+        echo -e "  ${W}[6]${N} 👑  Admin tool"
         echo -e "  ${W}[7]${N} 🗑   Xoá dữ liệu game"
         echo -e "  ${W}[0]${N} ✗   Thoát"
         echo ""
@@ -513,7 +563,7 @@ main_menu() {
             6) admin_menu ;;
             7) do_reset_data ;;
             0) echo ""; exit 0 ;;
-            *) warn "Chọn lại" ; sleep 1 ;;
+            *) warn "Chọn lại"; sleep 1 ;;
         esac
     done
 }
