@@ -107,41 +107,52 @@ except Exception as e:
 PY
 }
 
-# ── Copy APK sang sdcard/Download ────────────────
+# ── Cấp quyền storage + copy APK sang Download ───
+setup_storage() {
+    # Đã có quyền rồi thì thôi
+    [ -d "$HOME/storage/downloads" ] && return 0
+    echo ""
+    warn "Termux chưa có quyền truy cập bộ nhớ trong."
+    echo -e "  ${Y}→ Sắp hiện hộp thoại xin quyền — bấm 'Cho phép'${N}"
+    read -rp "  Nhấn Enter để tiếp tục..."
+    termux-setup-storage
+    # Chờ user cấp quyền (dialog async)
+    local tries=0
+    while [ ! -d "$HOME/storage/downloads" ]; do
+        sleep 1; tries=$((tries+1))
+        [ $tries -ge 15 ] && break
+    done
+    [ -d "$HOME/storage/downloads" ] && ok "Quyền storage OK" \
+                                     || warn "Chưa cấp quyền — APK vẫn lưu ở ~/nro/"
+}
+
 copy_apk_sdcard() {
     local src="$1"
     local dst_name="Hashirama-NRO.apk"
-    local dst=""
 
-    # Thử các đường dẫn sdcard phổ biến trên Android/Termux
+    # Đảm bảo có quyền storage
+    setup_storage
+
+    # Thử tất cả đường dẫn Download phổ biến
+    local dst=""
     for candidate in \
         "$HOME/storage/downloads/$dst_name" \
         "/sdcard/Download/$dst_name" \
-        "/storage/emulated/0/Download/$dst_name"
+        "/storage/emulated/0/Download/$dst_name" \
+        "/sdcard/Downloads/$dst_name"
     do
-        local dir; dir=$(dirname "$candidate")
-        if [ -d "$dir" ]; then
-            dst="$candidate"
-            break
+        if [ -d "$(dirname "$candidate")" ]; then
+            dst="$candidate"; break
         fi
     done
 
     if [ -n "$dst" ]; then
         cp "$src" "$dst" 2>/dev/null \
-            && ok "APK đã copy → ${Y}$dst${N}" \
-            || warn "Copy sdcard thất bại — cài từ: $src"
+            && ok "APK → ${Y}$dst${N}" \
+            || { warn "Copy thất bại, thử lại với tee...";
+                 cat "$src" > "$dst" 2>/dev/null && ok "APK → ${Y}$dst${N}"; }
     else
-        # sdcard chưa mount → chạy termux-setup-storage
-        warn "Chưa cấp quyền lưu trữ. Cấp quyền rồi thử lại..."
-        termux-setup-storage 2>/dev/null
-        sleep 3
-        if [ -d "$HOME/storage/downloads" ]; then
-            cp "$src" "$HOME/storage/downloads/$dst_name" 2>/dev/null \
-                && ok "APK đã copy → ${Y}$HOME/storage/downloads/$dst_name${N}" \
-                || warn "Vẫn thất bại — cài từ: $src"
-        else
-            warn "Cài trực tiếp từ: $src"
-        fi
+        warn "Không copy được vào sdcard — dùng [9] Cài APK để cài trực tiếp"
     fi
 }
 
@@ -545,6 +556,52 @@ admin_menu() {
     done
 }
 
+do_install_apk() {
+    banner
+    echo -e "  ${C}════ CÀI APK TRỰC TIẾP ════${N}"
+    echo ""
+
+    [ ! -f "$APK_OUT" ] && {
+        err "Chưa có APK — chạy [1] Setup trước"
+        read -rp "  Enter..."; return
+    }
+
+    ok "APK: $APK_OUT ($(du -sh "$APK_OUT" | cut -f1))"
+    echo ""
+
+    # Thử termux-open trước (mở dialog cài APK của Android)
+    if command -v termux-open >/dev/null 2>&1; then
+        info "Mở dialog cài APK..."
+        termux-open --content-type application/vnd.android.package-archive "$APK_OUT" 2>/dev/null &
+        disown
+        echo ""
+        ok "Hộp thoại cài APK đã mở!"
+        echo -e "  ${Y}→ Bấm 'Cài đặt' trên màn hình điện thoại${N}"
+    else
+        # fallback: am start
+        info "Thử mở bằng am start..."
+        am start -a android.intent.action.VIEW \
+            -d "file://$APK_OUT" \
+            -t application/vnd.android.package-archive \
+            --flags 0x10000001 >/dev/null 2>&1 &
+        disown
+        echo ""
+        ok "Đã gọi trình cài APK!"
+        echo -e "  ${Y}→ Bấm 'Cài đặt' trên màn hình điện thoại${N}"
+    fi
+
+    echo ""
+    echo -e "  ${W}APK cũng có ở:${N}"
+    echo -e "  ${Y}$APK_OUT${N}"
+    # In đường dẫn sdcard nếu có
+    for p in "$HOME/storage/downloads/Hashirama-NRO.apk" \
+              "/sdcard/Download/Hashirama-NRO.apk"; do
+        [ -f "$p" ] && echo -e "  ${Y}$p${N}" && break
+    done
+    echo ""
+    read -rp "  Nhấn Enter..."
+}
+
 do_clean() {
     banner
     echo -e "  ${C}════ DỌN FILE THỪA ════${N}"
@@ -650,6 +707,7 @@ main_menu() {
         echo -e "  ${W}[6]${N} 👑  Admin tool"
         echo -e "  ${W}[7]${N} 🗑   Xoá dữ liệu game"
         echo -e "  ${W}[8]${N} 🧹  Dọn file thừa (giải phóng bộ nhớ)"
+        echo -e "  ${W}[9]${N} 📲  Cài APK trực tiếp (không cần file manager)"
         echo -e "  ${W}[0]${N} ✗   Thoát"
         echo ""
         read -r -p "  Chọn: " choice
@@ -663,6 +721,7 @@ main_menu() {
             6) admin_menu ;;
             7) do_reset_data ;;
             8) do_clean ;;
+            9) do_install_apk ;;
             0) echo ""; exit 0 ;;
             *) ;;
         esac
