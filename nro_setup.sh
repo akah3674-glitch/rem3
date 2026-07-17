@@ -638,73 +638,57 @@ do_install_apk() {
     echo -e "  ${C}════ CÀI APK TRỰC TIẾP ════${N}"
     echo ""
 
-    # ── Bước 1: Xoá file APK cũ ở mọi nơi ──────────────────────────
+    # ── Bước 1: Xoá tất cả file APK cũ ─────────────────────────────
     info "Xoá file APK cũ..."
     rm -f "$APK_OUT" \
           "$HOME/storage/downloads/Hashirama-NRO.apk" \
           "$HOME/storage/downloads/Hashirama-Androi.apk" \
           "/sdcard/Download/Hashirama-NRO.apk" \
           "/sdcard/Download/Hashirama-Androi.apk" 2>/dev/null
-    ok "Đã xoá file APK cũ"
+    ok "Đã xoá file cũ"
 
-    # ── Bước 2: Uninstall app cũ (nếu đang cài) ─────────────────────
+    # ── Bước 2: Gỡ app cũ khỏi máy ─────────────────────────────────
     info "Gỡ cài đặt app cũ (nếu có)..."
-    if pm uninstall com.Hashirama.Hashirama >/dev/null 2>&1; then
-        ok "Đã gỡ app cũ"
-    else
-        warn "App chưa được cài hoặc đã gỡ rồi — OK"
-    fi
+    pm uninstall com.Hashirama.Hashirama >/dev/null 2>&1 \
+        && ok "Đã gỡ app cũ" \
+        || warn "App chưa cài hoặc đã gỡ rồi — OK"
     echo ""
 
-    # ── Bước 3: Tải lại APK mới từ GitHub ───────────────────────────
-    info "Đang tải APK mới (~129MB) từ GitHub..."
+    # ── Bước 3: Tải APK đã patch+sign sẵn từ GitHub ─────────────────
+    # APK trên GitHub đã được patch IP 127.0.0.1:14445 và sign sẵn
+    info "Đang tải APK (~129MB) từ GitHub..."
     echo -e "  ${Y}Vui lòng đợi...${N}"
-    local apk_raw="$DIR/tmp_raw.apk"
-    local apk_patched="$DIR/tmp_patched.apk"
 
-    if ! download_file "$URL_APK" "$apk_raw" "APK gốc"; then
-        err "Tải APK thất bại"
+    if ! download_file "$URL_APK" "$APK_OUT" "Hashirama APK"; then
+        err "Tải APK thất bại — kiểm tra mạng rồi thử lại"
         read -rp "  Enter..."; return
     fi
 
-    # ── Bước 4: Patch + Sign ─────────────────────────────────────────
-    patch_apk "$apk_raw" "$apk_patched"
-    if [ ! -f "$apk_patched" ]; then
-        err "Patch APK thất bại"
-        rm -f "$apk_raw"
-        read -rp "  Enter..."; return
-    fi
-    sign_apk "$apk_patched"
-    mv "$apk_patched" "$APK_OUT"
-    rm -f "$apk_raw"
-
-    # Copy ra sdcard để dự phòng
+    # Copy ra sdcard để dùng file manager nếu cần
     copy_apk_sdcard "$APK_OUT"
 
     echo ""
-    ok "APK sẵn sàng: $APK_OUT ($(du -sh "$APK_OUT" | cut -f1))"
+    ok "APK sẵn sàng: $(du -sh "$APK_OUT" | cut -f1)"
     echo ""
 
-    # ── Bước 5: Mở dialog cài ────────────────────────────────────────
+    # ── Bước 4: Mở dialog cài ───────────────────────────────────────
     if command -v termux-open >/dev/null 2>&1; then
-        info "Mở dialog cài APK..."
+        info "Mở dialog cài đặt..."
         termux-open --content-type application/vnd.android.package-archive "$APK_OUT" 2>/dev/null &
         disown
         ok "Hộp thoại cài APK đã mở!"
-        echo -e "  ${Y}→ Bấm 'Cài đặt' trên màn hình điện thoại${N}"
     else
-        info "Thử mở bằng am start..."
         am start -a android.intent.action.VIEW \
             -d "file://$APK_OUT" \
             -t application/vnd.android.package-archive \
             --flags 0x10000001 >/dev/null 2>&1 &
         disown
         ok "Đã gọi trình cài APK!"
-        echo -e "  ${Y}→ Bấm 'Cài đặt' trên màn hình điện thoại${N}"
     fi
 
+    echo -e "  ${Y}→ Bấm 'Cài đặt' trên màn hình điện thoại${N}"
     echo ""
-    echo -e "  ${W}APK cũng có ở:${N}  ${Y}$APK_OUT${N}"
+    echo -e "  ${W}Nếu hộp thoại không hiện, mở file manager → Download → Hashirama-NRO.apk${N}"
     echo ""
     read -rp "  Nhấn Enter..."
 }
