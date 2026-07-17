@@ -545,6 +545,63 @@ admin_menu() {
     done
 }
 
+do_clean() {
+    banner
+    echo -e "  ${C}════ DỌN FILE THỪA ════${N}"
+    echo ""
+
+    local total=0
+    _show() {
+        local f="$1" label="$2"
+        if [ -f "$f" ]; then
+            local sz; sz=$(du -sh "$f" 2>/dev/null | cut -f1)
+            echo -e "  ${Y}[$sz]${N} $label"
+            echo "    $f"
+        fi
+    }
+
+    echo -e "  ${W}Có thể xoá:${N}"
+    _show "$DIR/nro_hashirama.sql"   "SQL dump (chỉ cần lúc import, DB đã có rồi)"
+    _show "$DIR/Hashirama-orig.apk"  "APK gốc chưa patch (file tạm)"
+    _show "$DIR/Hashirama-patched.apk" "APK patched chưa sign (file tạm)"
+    _show "$DIR/debug.keystore"      "Keystore tự tạo (tái tạo được)"
+
+    echo ""
+    echo -e "  ${W}Không xoá:${N} Hashirama.apk · Srcgame.jar · ServerLogin.jar · logs"
+    echo ""
+    read -rp "  Xoá hết những file trên? [y/N]: " yn
+    [[ "$yn" != "y" && "$yn" != "Y" ]] && { warn "Huỷ"; read -rp "  Enter..."; return; }
+
+    echo ""
+    local freed=0
+    _del() {
+        local f="$1" label="$2"
+        if [ -f "$f" ]; then
+            local bytes; bytes=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            rm -f "$f" && ok "Xoá: $label ($(( bytes/1024/1024 ))MB)" \
+                       || warn "Không xoá được: $f"
+            freed=$(( freed + bytes ))
+        fi
+    }
+
+    _del "$DIR/nro_hashirama.sql"      "nro_hashirama.sql"
+    _del "$DIR/Hashirama-orig.apk"     "Hashirama-orig.apk"
+    _del "$DIR/Hashirama-patched.apk"  "Hashirama-patched.apk"
+    _del "$DIR/debug.keystore"         "debug.keystore"
+
+    # Xoá log cũ nếu > 10MB
+    local log_sz
+    log_sz=$(du -sb "$LOG" 2>/dev/null | cut -f1 || echo 0)
+    if [ "$log_sz" -gt 10485760 ]; then
+        > "$LOG/game.log"; > "$LOG/login.log"
+        ok "Xoá log cũ (> 10MB)"
+    fi
+
+    echo ""
+    ok "Đã giải phóng ~$(( freed/1024/1024 ))MB"
+    read -rp "  Nhấn Enter..."
+}
+
 do_reset_data() {
     banner
     echo -e "  ${C}════ XOÁ DỮ LIỆU ════${N}"
@@ -592,6 +649,7 @@ main_menu() {
         echo -e "  ${W}[5]${N} 📜  Xem log live"
         echo -e "  ${W}[6]${N} 👑  Admin tool"
         echo -e "  ${W}[7]${N} 🗑   Xoá dữ liệu game"
+        echo -e "  ${W}[8]${N} 🧹  Dọn file thừa (giải phóng bộ nhớ)"
         echo -e "  ${W}[0]${N} ✗   Thoát"
         echo ""
         read -r -p "  Chọn: " choice
@@ -604,6 +662,7 @@ main_menu() {
             5) do_log ;;
             6) admin_menu ;;
             7) do_reset_data ;;
+            8) do_clean ;;
             0) echo ""; exit 0 ;;
             *) ;;
         esac
