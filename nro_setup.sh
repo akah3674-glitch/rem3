@@ -662,7 +662,7 @@ do_install_apk() {
     local apk_raw="$DIR/tmp_raw.apk"
     local apk_patched="$DIR/tmp_patched.apk"
 
-    if ! dl_file "$URL_APK" "$apk_raw" "APK gốc"; then
+    if ! download_file "$URL_APK" "$apk_raw" "APK gốc"; then
         err "Tải APK thất bại"
         read -rp "  Enter..."; return
     fi
