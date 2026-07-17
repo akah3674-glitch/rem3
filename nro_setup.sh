@@ -166,107 +166,86 @@ SQLEOF
 # BƯỚC 3: Tải APK từ Google Drive
 # ══════════════════════════════════════════════════════════════════
 step_download_apk() {
+  local rar_file="/tmp/nro_drive.rar"
   local apk_raw="/tmp/nro_original.apk"
-  local success=0
 
-  rm -f "$apk_raw" 2>/dev/null || true
+  rm -f "$rar_file" "$apk_raw" 2>/dev/null || true
 
-  inf "Tải APK từ Google Drive (ID: $GDRIVE_ID)..."
+  # Cài p7zip để giải nén RAR
+  inf "Cài p7zip (giải nén RAR)..."
+  pkg install -y p7zip 2>/dev/null | grep "Setting up" || true
 
-  # ── Method 1: gdown (update lên mới nhất trước) ──
-  inf "[1/4] Thử gdown..."
-  pip3 install -q -U gdown 2>/dev/null || true
-  python3 - << PYEOF 2>&1 && success=1 || true
-import sys
-try:
-    import gdown
-    out = gdown.download(
-        id="$GDRIVE_ID",
-        output="$apk_raw",
-        quiet=False,
-        fuzzy=True,
-        use_cookies=False
-    )
-    if out:
-        print("gdown OK:", out)
-    else:
-        print("gdown trả về None")
-        sys.exit(1)
-except Exception as e:
-    print("gdown lỗi:", e)
-    sys.exit(1)
-PYEOF
+  # ── Tải file RAR từ Drive ──
+  # URL trực tiếp đã kiểm tra - hoạt động ổn định
+  local DRIVE_URL="https://drive.usercontent.google.com/download?id=${GDRIVE_ID}&export=download&authuser=0&confirm=t"
 
-  _apk_check "$apk_raw" && success=1 || success=0
+  inf "Tải file từ Google Drive (~2.2GB, RAR)..."
+  wrn "Lưu ý: file lớn ~2.2GB, cần đủ dung lượng và mạng ổn định"
+  echo ""
 
-  # ── Method 2: curl với confirm token ──
-  if [[ $success -eq 0 ]]; then
-    inf "[2/4] Thử curl + confirm token..."
-    local CFILE="/tmp/gdrive_cookie.txt"
-    rm -f "$CFILE" 2>/dev/null || true
+  curl -L -A "Mozilla/5.0" \
+    --retry 3 --retry-delay 5 \
+    --continue-at - \
+    --progress-bar \
+    "$DRIVE_URL" \
+    -o "$rar_file" 2>&1
 
-    curl -sc "$CFILE" -A "Mozilla/5.0" \
-      "https://drive.google.com/uc?export=download&id=$GDRIVE_ID" \
-      -o /tmp/gd_page.html 2>/dev/null || true
-
-    local CONFIRM
-    CONFIRM=$(grep -oP '(?<=confirm=)[^&"&amp;]+' /tmp/gd_page.html 2>/dev/null | head -1)
-    [[ -z "$CONFIRM" ]] && CONFIRM=$(grep -oP 'confirm=([^&"]+)' /tmp/gd_page.html 2>/dev/null | head -1 | cut -d= -f2)
-    [[ -z "$CONFIRM" ]] && CONFIRM="t"
-
-    inf "  Confirm: $CONFIRM"
-    curl -Lb "$CFILE" -A "Mozilla/5.0" \
-      "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=$GDRIVE_ID" \
-      --progress-bar -o "$apk_raw" 2>/dev/null || true
-
-    _apk_check "$apk_raw" && success=1
+  local sz; sz=$(stat -c%s "$rar_file" 2>/dev/null || echo 0)
+  if [[ "$sz" -lt 1000000 ]]; then
+    err "Tải thất bại hoặc file không đúng (${sz} bytes)"
+    # Thử wget
+    inf "Thử lại bằng wget..."
+    wget --continue --show-progress -q \
+      "$DRIVE_URL" \
+      -O "$rar_file" 2>/dev/null || true
+    sz=$(stat -c%s "$rar_file" 2>/dev/null || echo 0)
   fi
 
-  # ── Method 3: drive.usercontent.google.com ──
-  if [[ $success -eq 0 ]]; then
-    inf "[3/4] Thử drive.usercontent.google.com..."
-    curl -L -A "Mozilla/5.0" \
-      "https://drive.usercontent.google.com/download?id=$GDRIVE_ID&export=download&authuser=0&confirm=t" \
-      --progress-bar -o "$apk_raw" 2>/dev/null || true
-
-    _apk_check "$apk_raw" && success=1
-  fi
-
-  # ── Method 4: wget ──
-  if [[ $success -eq 0 ]]; then
-    inf "[4/4] Thử wget..."
-    wget -q --show-progress --no-check-certificate \
-      --user-agent="Mozilla/5.0" \
-      "https://drive.usercontent.google.com/download?id=$GDRIVE_ID&export=download&confirm=t" \
-      -O "$apk_raw" 2>/dev/null || true
-
-    _apk_check "$apk_raw" && success=1
-  fi
-
-  if [[ $success -eq 0 ]]; then
-    err "Tất cả 4 method đều thất bại!"
-    wrn "File Drive có thể bị giới hạn tải. Thử:"
-    echo "  1. Mở link Drive → Share → Anyone with link"
-    echo "  2. Tải APK thủ công vào /tmp/nro_original.apk rồi chạy lại"
+  if [[ "$sz" -lt 1000000 ]]; then
+    err "Tải Drive thất bại! (${sz} bytes)"
     return 1
   fi
 
-  local sz; sz=$(du -h "$apk_raw" 2>/dev/null | cut -f1)
-  ok "APK tải xong: $sz"
+  ok "Tải xong: $(du -h "$rar_file" | cut -f1)"
+
+  # ── Giải nén RAR ──
+  inf "Giải nén RAR..."
+  mkdir -p /tmp/nro_extract
+  7z x -y "$rar_file" -o/tmp/nro_extract 2>&1 | tail -5 || true
+
+  # Tìm APK bên trong
+  local found_apk
+  found_apk=$(find /tmp/nro_extract -name "*.apk" 2>/dev/null | head -1)
+
+  if [[ -z "$found_apk" ]]; then
+    # Thử tìm nested RAR/ZIP
+    local nested
+    nested=$(find /tmp/nro_extract -name "*.rar" -o -name "*.zip" 2>/dev/null | head -1)
+    if [[ -n "$nested" ]]; then
+      inf "Giải nén lớp 2: $(basename $nested)..."
+      7z x -y "$nested" -o/tmp/nro_extract2 2>&1 | tail -3 || true
+      found_apk=$(find /tmp/nro_extract2 -name "*.apk" 2>/dev/null | head -1)
+    fi
+  fi
+
+  if [[ -z "$found_apk" ]]; then
+    err "Không tìm thấy file APK trong RAR!"
+    inf "Nội dung giải nén:"
+    find /tmp/nro_extract -type f 2>/dev/null | head -20
+    return 1
+  fi
+
+  cp "$found_apk" "$apk_raw"
+  ok "APK: $(basename $found_apk) ($(du -h "$apk_raw" | cut -f1))"
   echo "$apk_raw"
 }
 
-# Kiểm tra file APK hợp lệ (>= 1MB và có magic bytes PK)
 _apk_check() {
   local f="$1"
   [[ ! -f "$f" ]] && return 1
   local sz; sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
-  [[ "$sz" -lt 1000000 ]] && { wrn "  File quá nhỏ: ${sz} bytes (có thể là trang lỗi)"; return 1; }
-  # APK/ZIP bắt đầu bằng PK (0x504B)
-  local magic; magic=$(xxd -l 2 "$f" 2>/dev/null | awk '{print $2$3}' | head -1)
-  [[ "$magic" == "504b" ]] && return 0
-  wrn "  File không phải APK/ZIP (magic: $magic)"
-  return 1
+  [[ "$sz" -lt 1000000 ]] && return 1
+  return 0
 }
 
 # ══════════════════════════════════════════════════════════════════
