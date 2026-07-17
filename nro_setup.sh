@@ -302,88 +302,2330 @@ EOF
 # ══════════════════════════════════════════════════════════════════
 _mysql() { mysql -u root -h 127.0.0.1 "$DB_NAME" -e "$1" 2>/dev/null; }
 
-admin_give() {
-  local col="$1" label="$2"
-  echo ""; read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
-  read -p "$(echo -e "${C}Số $label: ${N}")" amt
-  local ex; ex=$(_mysql "SELECT COUNT(*) FROM nro_nhan_vat WHERE name='$cn';" 2>/dev/null | tail -1)
-  [[ "$ex" == "0" ]] && { err "Không tìm thấy '$cn'!"; } || {
-    _mysql "UPDATE nro_nhan_vat SET $col=$col+$amt WHERE name='$cn';" \
-      && ok "Đã nạp $amt $label cho '$cn'!" || err "Thất bại!"
-    _mysql "SELECT name, level, vang, ngoc FROM nro_nhan_vat WHERE name='$cn';" 2>/dev/null \
-      || _mysql "SELECT * FROM nro_nhan_vat WHERE name='$cn' LIMIT 1;" 2>/dev/null
-  }
-  read -p $'\e[1;32m[Enter]...\e[0m' _
+# ── Helper tìm tên cột thực tế trong DB ──────────────────────────
+_find_col() {
+  local tbl="$1"; shift
+  for col in "$@"; do
+    _mysql "SHOW COLUMNS FROM $tbl LIKE '$col';" 2>/dev/null | grep -q "$col" && echo "$col" && return
+  done
+  echo "$1"  # default = tên đầu tiên
 }
 
-admin_menu() {
+_char_tbl()  { _mysql "SHOW TABLES;" 2>/dev/null | grep -Ei "nhan_vat|character|nro_char|player" | head -1; }
+_acc_tbl()   { _mysql "SHOW TABLES;" 2>/dev/null | grep -Ei "account|user|member" | head -1; }
+
+_get_char() {
+  echo ""; read -p "$(echo -e "${C}Tên nhân vật: ${N}")" _CN
+  echo "$_CN"
+}
+
+# ── Nạp stat ─────────────────────────────────────────────────────
+admin_give() {
+  local col_candidates=("$@")
+  local label="${col_candidates[-1]}"
+  unset 'col_candidates[-1]'
+
+  local CTBL; CTBL=$(_char_tbl)
+  [[ -z "$CTBL" ]] && { err "Không tìm thấy bảng nhân vật!"; sleep 2; return; }
+  local COL; COL=$(_find_col "$CTBL" "${col_candidates[@]}")
+
+  echo ""; read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
+  read -p "$(echo -e "${C}Số $label cần nạp: ${N}")" amt
+  local ex; ex=$(_mysql "SELECT COUNT(*) FROM $CTBL WHERE name='$cn';" 2>/dev/null | tail -1)
+  if [[ "$ex" == "0" ]]; then
+    err "Không tìm thấy '$cn'!"
+  else
+    _mysql "UPDATE $CTBL SET $COL=$COL+$amt WHERE name='$cn';" \
+      && ok "✓ Nạp $amt $label cho '$cn'" || err "Thất bại!"
+    _mysql "SELECT name,level,$COL FROM $CTBL WHERE name='$cn';" 2>/dev/null
+  fi
+  read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _
+}
+
+# ── Set level ────────────────────────────────────────────────────
+admin_set_level() {
+  local CTBL; CTBL=$(_char_tbl)
+  echo ""; read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
+  read -p "$(echo -e "${C}Level muốn set: ${N}")" lv
+  read -p "$(echo -e "${C}EXP thêm (Enter=0): ${N}")" ex; ex="${ex:-0}"
+  local ECOL; ECOL=$(_find_col "$CTBL" exp kinh_nghiem experience)
+  _mysql "UPDATE $CTBL SET level=$lv, $ECOL=$ECOL+$ex WHERE name='$cn';" \
+    && ok "Set level $lv + $ex EXP cho '$cn'" || err "Thất bại!"
+  _mysql "SELECT name,level,$ECOL FROM $CTBL WHERE name='$cn';" 2>/dev/null
+  read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _
+}
+
+# ── Cho item / trang bị ──────────────────────────────────────────
+admin_give_item() {
+  local CTBL; CTBL=$(_char_tbl)
+  local ITBL; ITBL=$(_mysql "SHOW TABLES;" 2>/dev/null | grep -Ei "item|do|trang_bi" | head -1)
+  echo ""
+  if [[ -z "$ITBL" ]]; then
+    wrn "Không tìm thấy bảng item trong DB"
+    inf "Thử dùng SQL tuỳ ý để xem cấu trúc"
+    read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _; return
+  fi
+  echo -e "${C}Bảng item: $ITBL${N}"
+  _mysql "DESCRIBE $ITBL;" 2>/dev/null
+  echo ""
+  read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
+  read -p "$(echo -e "${C}Item ID: ${N}")" iid
+  read -p "$(echo -e "${C}Số lượng [1]: ${N}")" qty; qty="${qty:-1}"
+  local cid; cid=$(_mysql "SELECT id FROM $CTBL WHERE name='$cn';" 2>/dev/null | tail -1)
+  if [[ -z "$cid" || "$cid" == "id" ]]; then
+    err "Không tìm thấy nhân vật '$cn'!"
+  else
+    _mysql "INSERT INTO $ITBL (char_id, item_id, quantity) VALUES ($cid,$iid,$qty);" 2>/dev/null \
+      || _mysql "INSERT INTO $ITBL (nhan_vat_id, item_id, so_luong) VALUES ($cid,$iid,$qty);" 2>/dev/null \
+      && ok "Cho item $iid x$qty vào túi '$cn'" || err "Thất bại — thử SQL tuỳ ý"
+  fi
+  read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _
+}
+
+# ── Xem top bảng xếp hạng ────────────────────────────────────────
+admin_top() {
+  local CTBL; CTBL=$(_char_tbl)
+  echo ""
+  echo -e "${Y}══ TOP 20 NHÂN VẬT ══${N}"
+  _mysql "SELECT name, level, vang, ngoc FROM $CTBL ORDER BY level DESC, vang DESC LIMIT 20;" 2>/dev/null \
+    || _mysql "SELECT name, level FROM $CTBL ORDER BY level DESC LIMIT 20;" 2>/dev/null
+  echo ""
+  echo -e "${Y}══ TỔNG THỐNG KÊ ══${N}"
+  _mysql "SELECT COUNT(*) AS tong_nhan_vat FROM $CTBL;" 2>/dev/null
+  local ATBL; ATBL=$(_acc_tbl)
+  _mysql "SELECT COUNT(*) AS tong_tai_khoan FROM $ATBL;" 2>/dev/null
+  read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _
+}
+
+# ── Broadcast thông báo server ───────────────────────────────────
+admin_broadcast() {
+  local BTBL; BTBL=$(_mysql "SHOW TABLES;" 2>/dev/null | grep -Ei "bang_tin|notice|announce|broadcast|thong_bao" | head -1)
+  echo ""
+  if [[ -z "$BTBL" ]]; then
+    wrn "Không tìm thấy bảng thông báo"
+    inf "Server Hashirama gõ lệnh trong game: /tb <nội dung>"
+    read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _; return
+  fi
+  echo -e "${C}Bảng: $BTBL${N}"
+  _mysql "DESCRIBE $BTBL;" 2>/dev/null
+  read -p "$(echo -e "${C}Nội dung thông báo: ${N}")" msg
+  _mysql "INSERT INTO $BTBL (content, created_at) VALUES ('$msg', NOW());" 2>/dev/null \
+    && ok "Đã gửi thông báo!" || err "Thất bại"
+  read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _
+}
+
+# ── Quản lý Bot NPC ──────────────────────────────────────────────
+admin_bot() {
+  local BTBL; BTBL=$(_mysql "SHOW TABLES;" 2>/dev/null | grep -Ei "bot|npc|mob_bot" | head -1)
+  echo ""
+  if [[ -z "$BTBL" ]]; then
+    wrn "Không tìm thấy bảng bot/NPC"
+    inf "Bot Hashirama được config trong file server, không qua DB"
+    inf "Xem file: $NRO_HOME/bin/config/ hoặc gõ /bot trong game"
+    read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _; return
+  fi
+  echo -e "${C}Bảng bot: $BTBL${N}"
+  _mysql "SELECT * FROM $BTBL LIMIT 10;" 2>/dev/null
+  echo ""
+  echo -e "  ${Y}[1]${N} Thêm bot  ${Y}[2]${N} Xoá bot  ${Y}[3]${N} Bật/Tắt bot  ${Y}[0]${N} Quay lại"
+  read -p "$(echo -e "${C}Chọn: ${N}")" bc
+  case "$bc" in
+    1) read -p "$(echo -e "${C}Tên bot: ${N}")" bn
+       read -p "$(echo -e "${C}Map ID: ${N}")" bm
+       _mysql "INSERT INTO $BTBL (name, map_id, active) VALUES ('$bn',$bm,1);" \
+         && ok "Thêm bot '$bn' OK" || err "Thất bại";;
+    2) read -p "$(echo -e "${C}Tên bot cần xoá: ${N}")" bn
+       _mysql "DELETE FROM $BTBL WHERE name='$bn';" && ok "Xoá OK" || err "Thất bại";;
+    3) read -p "$(echo -e "${C}Tên bot: ${N}")" bn
+       read -p "$(echo -e "${C}Bật [1] / Tắt [0]: ${N}")" st
+       _mysql "UPDATE $BTBL SET active=$st WHERE name='$bn';" && ok "OK" || err "Thất bại";;
+  esac
+  read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _
+}
+
+# ── Tạo / Quản lý tài khoản ──────────────────────────────────────
+admin_account() {
+  local ATBL; ATBL=$(_acc_tbl)
+  [[ -z "$ATBL" ]] && { err "Không tìm thấy bảng account!"; sleep 2; return; }
+
   while true; do
     clear
-    echo -e "${W}══════ ADMIN / GM TOOL ══════${N}"
-    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
-      && echo -e "  ${G}● DB: Online ($DB_NAME)${N}" \
-      || echo -e "  ${R}● DB: Offline — chạy Start Server trước${N}"
-    echo ""
-    echo -e "  ${Y}[1]${N} Nạp VÀNG"
-    echo -e "  ${Y}[2]${N} Nạp NGỌC"
-    echo -e "  ${Y}[3]${N} Nạp EXP / Set Level"
-    echo -e "  ${Y}[4]${N} Danh sách nhân vật"
-    echo -e "  ${Y}[5]${N} Tạo tài khoản"
-    echo -e "  ${Y}[6]${N} Reset mật khẩu"
-    echo -e "  ${Y}[7]${N} Ban / Unban"
-    echo -e "  ${Y}[8]${N} Xem Tables trong DB"
-    echo -e "  ${Y}[9]${N} SQL tuỳ ý"
+    echo -e "${W}══════ QUẢN LÝ TÀI KHOẢN ══════${N}"
+    echo -e "  ${Y}[1]${N} Đăng ký tài khoản mới"
+    echo -e "  ${Y}[2]${N} Reset mật khẩu"
+    echo -e "  ${Y}[3]${N} Ban tài khoản"
+    echo -e "  ${Y}[4]${N} Unban tài khoản"
+    echo -e "  ${Y}[5]${N} Set GM / Admin"
+    echo -e "  ${Y}[6]${N} Danh sách tài khoản"
+    echo -e "  ${Y}[7]${N} Xoá tài khoản"
     echo -e "  ${Y}[0]${N} Quay lại"
     echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
     case "$ch" in
-      1) admin_give "vang" "vàng" ;;
-      2) admin_give "ngoc" "ngọc" ;;
-      3)
-        echo ""; read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
-        read -p "$(echo -e "${C}EXP thêm: ${N}")" exp
-        read -p "$(echo -e "${C}Level set (Enter=bỏ qua): ${N}")" lv
-        if [[ -n "$lv" ]]; then
-          _mysql "UPDATE nro_nhan_vat SET exp=exp+$exp, level=$lv WHERE name='$cn';" \
-            && ok "OK!" || err "Thất bại!"
-        else
-          _mysql "UPDATE nro_nhan_vat SET exp=exp+$exp WHERE name='$cn';" \
-            && ok "OK!" || err "Thất bại!"
-        fi
-        read -p $'\e[1;32m[Enter]...\e[0m' _;;
-      4)
-        echo ""
-        _mysql "SELECT name, level, vang, ngoc FROM nro_nhan_vat ORDER BY level DESC LIMIT 30;" 2>/dev/null \
-          || _mysql "SELECT * FROM nro_nhan_vat LIMIT 30;" 2>/dev/null
-        read -p $'\e[1;32m[Enter]...\e[0m' _;;
-      5)
-        read -p "$(echo -e "${C}Username: ${N}")" u
-        read -s -p "$(echo -e "${C}Password: ${N}")" p; echo ""
-        local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
-        _mysql "INSERT INTO account (username, password) VALUES ('$u','$h');" \
-          && ok "Tạo '$u' OK!" || err "Thất bại!"
-        read -p $'\e[1;32m[Enter]...\e[0m' _;;
-      6)
-        read -p "$(echo -e "${C}Username: ${N}")" u
-        read -s -p "$(echo -e "${C}Pass mới: ${N}")" p; echo ""
-        local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
-        _mysql "UPDATE account SET password='$h' WHERE username='$u';" \
-          && ok "OK!" || err "Thất bại!"
-        read -p $'\e[1;32m[Enter]...\e[0m' _;;
-      7)
-        read -p "$(echo -e "${C}Username: ${N}")" u
-        echo -e "  ${Y}[1]${N} Ban  ${Y}[2]${N} Unban"
-        read -p "$(echo -e "${C}Chọn: ${N}")" bc
-        [[ "$bc" == "1" ]] && _mysql "UPDATE account SET status=0 WHERE username='$u';" && ok "Banned" || true
-        [[ "$bc" == "2" ]] && _mysql "UPDATE account SET status=1 WHERE username='$u';" && ok "Unbanned" || true
-        read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      1) read -p "$(echo -e "${C}Username: ${N}")" u
+         read -s -p "$(echo -e "${C}Password: ${N}")" p; echo ""
+         local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
+         _mysql "INSERT INTO $ATBL (username,password,status) VALUES ('$u','$h',1);" \
+           && ok "✓ Tạo tài khoản '$u'" || err "Thất bại (trùng username?)"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      2) read -p "$(echo -e "${C}Username: ${N}")" u
+         read -s -p "$(echo -e "${C}Pass mới: ${N}")" p; echo ""
+         local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
+         _mysql "UPDATE $ATBL SET password='$h' WHERE username='$u';" \
+           && ok "Reset pass '$u' OK" || err "Thất bại"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      3) read -p "$(echo -e "${C}Username: ${N}")" u
+         _mysql "UPDATE $ATBL SET status=0 WHERE username='$u';" && ok "Đã ban '$u'" || err "Thất bại"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      4) read -p "$(echo -e "${C}Username: ${N}")" u
+         _mysql "UPDATE $ATBL SET status=1 WHERE username='$u';" && ok "Đã unban '$u'" || err "Thất bại"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      5) read -p "$(echo -e "${C}Username: ${N}")" u
+         # Thử các cột GM thường gặp
+         _mysql "UPDATE $ATBL SET gm=1 WHERE username='$u';" 2>/dev/null \
+           || _mysql "UPDATE $ATBL SET role='admin' WHERE username='$u';" 2>/dev/null \
+           || _mysql "UPDATE $ATBL SET cap_do_gm=1 WHERE username='$u';" 2>/dev/null \
+           && ok "Set GM cho '$u'" || wrn "Không rõ cột GM — thử SQL tuỳ ý"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      6) echo ""
+         _mysql "SELECT id,username,status FROM $ATBL ORDER BY id DESC LIMIT 30;" 2>/dev/null
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      7) read -p "$(echo -e "${R}Username cần xoá: ${N}")" u
+         read -p "$(echo -e "${R}Xác nhận xoá '$u'? [y/N]: ${N}")" cf
+         [[ "$cf" == "y" || "$cf" == "Y" ]] && \
+           _mysql "DELETE FROM $ATBL WHERE username='$u';" && ok "Đã xoá '$u'" || wrn "Huỷ"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      0) break;;
+    esac
+  done
+}
+
+# ── Quản lý nhân vật đầy đủ ──────────────────────────────────────
+admin_char() {
+  local CTBL; CTBL=$(_char_tbl)
+  [[ -z "$CTBL" ]] && { err "Không tìm thấy bảng nhân vật!"; sleep 2; return; }
+
+  while true; do
+    clear
+    echo -e "${W}══════ QUẢN LÝ NHÂN VẬT ══════${N}"
+    echo -e "  ${Y}[1]${N} Nạp VÀNG"
+    echo -e "  ${Y}[2]${N} Nạp NGỌC"
+    echo -e "  ${Y}[3]${N} Set Level / EXP"
+    echo -e "  ${Y}[4]${N} Cho Item"
+    echo -e "  ${Y}[5]${N} Dịch chuyển nhân vật (đổi map)"
+    echo -e "  ${Y}[6]${N} Reset vị trí (về map 1)"
+    echo -e "  ${Y}[7]${N} Xoá nhân vật"
+    echo -e "  ${Y}[8]${N} Top 20 nhân vật"
+    echo -e "  ${Y}[9]${N} Xem nhân vật cụ thể"
+    echo -e "  ${Y}[0]${N} Quay lại"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) admin_give "vang" "xu" "gold" "coin" "vàng";;
+      2) admin_give "ngoc" "gem" "diamond" "ngọc";;
+      3) admin_set_level;;
+      4) admin_give_item;;
+      5) read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
+         read -p "$(echo -e "${C}Map ID muốn đến: ${N}")" mid
+         _mysql "UPDATE $CTBL SET map_id=$mid, pos_x=0, pos_y=0 WHERE name='$cn';" \
+           && ok "Dịch chuyển '$cn' → map $mid" || err "Thất bại"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      6) read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
+         _mysql "UPDATE $CTBL SET map_id=1, pos_x=0, pos_y=0 WHERE name='$cn';" \
+           && ok "Reset vị trí '$cn' về map 1" || err "Thất bại"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      7) read -p "$(echo -e "${R}Tên nhân vật cần xoá: ${N}")" cn
+         read -p "$(echo -e "${R}Xác nhận xoá '$cn'? [y/N]: ${N}")" cf
+         [[ "$cf" == "y" ]] && _mysql "DELETE FROM $CTBL WHERE name='$cn';" \
+           && ok "Đã xoá '$cn'" || wrn "Huỷ"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      8) admin_top;;
+      9) read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cn
+         echo ""
+         _mysql "SELECT * FROM $CTBL WHERE name='$cn';" 2>/dev/null
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      0) break;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN ADMIN MENU
+# ══════════════════════════════════════════════════════════════════
+admin_menu() {
+  while true; do
+    clear
+    echo -e "${W}╔══════════════════════════════════╗${N}"
+    echo -e "${W}║     BẢNG ĐIỀU KHIỂN ADMIN        ║${N}"
+    echo -e "${W}╚══════════════════════════════════╝${N}"
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● DB: Online [$DB_NAME]${N}" \
+      || echo -e "  ${R}● DB: Offline — chạy [1] Start Server trước${N}"
+    echo ""
+    echo -e "  ${C}── TÀI KHOẢN ──────────────────────${N}"
+    echo -e "  ${Y}[1]${N} Quản lý tài khoản (đăng ký / ban / GM)"
+    echo ""
+    echo -e "  ${C}── NHÂN VẬT ───────────────────────${N}"
+    echo -e "  ${Y}[2]${N} Quản lý nhân vật (vàng / ngọc / level / item)"
+    echo ""
+    echo -e "  ${C}── SERVER ─────────────────────────${N}"
+    echo -e "  ${Y}[3]${N} Top BXH + thống kê server"
+    echo -e "  ${Y}[4]${N} Broadcast thông báo toàn server"
+    echo -e "  ${Y}[5]${N} Quản lý Bot / NPC"
+    echo ""
+    echo -e "  ${C}── NÂNG CAO ───────────────────────${N}"
+    echo -e "  ${Y}[6]${N} Xem tất cả Tables DB"
+    echo -e "  ${Y}[7]${N} SQL tuỳ ý (toàn quyền)"
+    echo -e "  ${Y}[8]${N} Backup DB"
+    echo -e "  ${Y}[9]${N} Xem log server"
+    echo ""
+    echo -e "  ${C}── GAME (lệnh gõ trong game) ──────${N}"
+    echo -e "  ${Y}[h]${N} Hướng dẫn lệnh in-game admin"
+    echo ""
+    echo -e "  ${Y}[0]${N} Quay lại menu chính"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) admin_account;;
+      2) admin_char;;
+      3) admin_top;;
+      4) admin_broadcast;;
+      5) admin_bot;;
+      6) echo ""; _mysql "SHOW TABLES;"; echo ""
+         _mysql "SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema='$DB_NAME' ORDER BY table_rows DESC;" 2>/dev/null
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      7) echo ""; _mysql "SHOW TABLES;"; echo ""
+         read -p "$(echo -e "${C}Nhập SQL: ${N}")" sql
+         [[ -n "$sql" ]] && _mysql "$sql"
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
       8)
-        echo ""; _mysql "SHOW TABLES;"
-        read -p $'\e[1;32m[Enter]...\e[0m' _;;
-      9)
-        echo ""; _mysql "SHOW TABLES;"; echo ""
-        read -p "$(echo -e "${C}SQL: ${N}")" sql
-        [[ -n "$sql" ]] && _mysql "$sql"
-        read -p $'\e[1;32m[Enter]...\e[0m' _;;
+        local bk="$NRO_HOME/backup_$(date +%Y%m%d_%H%M).sql"
+        inf "Backup DB → $bk"
+        mysqldump -u root "$DB_NAME" > "$bk" 2>/dev/null \
+          && ok "Backup OK: $(du -h "$bk" | cut -f1)" || err "Thất bại"
+        read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      9) echo ""
+         # Tìm log của server
+         for lf in "$NRO_HOME/bin/log"* "$PREFIX/tmp/mysqld.err" "$NRO_HOME"/*.log; do
+           [[ -f "$lf" ]] && { echo -e "${C}=== $lf ===${N}"; tail -20 "$lf"; echo ""; }
+         done
+         read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
+      h|H)
+        clear
+        echo -e "${W}══ LỆNH ADMIN TRONG GAME (Hashirama) ══${N}\n"
+        echo -e "  Đăng nhập tài khoản GM rồi gõ trong chat:\n"
+        echo -e "  ${Y}/tb <nội dung>${N}          → Thông báo toàn server"
+        echo -e "  ${Y}/gold <tên> <số>${N}        → Nạp vàng"
+        echo -e "  ${Y}/ngoc <tên> <số>${N}        → Nạp ngọc"
+        echo -e "  ${Y}/level <tên> <lv>${N}       → Set level"
+        echo -e "  ${Y}/kick <tên>${N}             → Kick khỏi server"
+        echo -e "  ${Y}/ban <tên>${N}              → Ban nhân vật"
+        echo -e "  ${Y}/unban <tên>${N}            → Unban"
+        echo -e "  ${Y}/akill <tên>${N}            → Admin kill"
+        echo -e "  ${Y}/tp <tên> <map>${N}         → Teleport"
+        echo -e "  ${Y}/item <tên> <id> <sl>${N}   → Cho item"
+        echo -e "  ${Y}/bot on|off${N}             → Bật/tắt bot"
+        echo -e "  ${Y}/maintenance${N}            → Bảo trì server"
+        echo -e "\n  ${C}Lệnh chính xác tuỳ version server.${N}"
+        echo -e "  ${C}Gõ /help trong game để xem đầy đủ.${N}"
+        read -p 
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN MENU
+# ══════════════════════════════════════════════════════════════════
+main_menu() {
+  while true; do
+    banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    [[ -f "$APK_OUT" ]] \
+      && echo -e "  ${G}● APK: Sẵn sàng${N}" \
+      || echo -e "  ${Y}● APK: Chưa có${N}"
+    echo ""
+    echo -e "  ${Y}[1]${N} Start Server"
+    echo -e "  ${Y}[2]${N} Stop Server"
+    echo -e "  ${Y}[3]${N} Admin Tool (vàng/ngọc/ban...)"
+    echo -e "  ${Y}[4]${N} Xem log MariaDB"
+    echo -e "  ${Y}[0]${N} Thoát"
+    echo ""; read -p "$(echo -e "${C}Chọn: ${N}")" ch
+    case "$ch" in
+      1) bash "$NRO_HOME/bin/start.sh"; read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      3) admin_menu;;
+      4) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
+         read -p $'\e[1;32m[Enter]...\e[0m' _;;
+      0) echo -e "${G}Bye!${N}"; exit 0;;
+    esac
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+banner
+
+if [[ -f "$SETUP_FLAG" ]]; then
+  inf "Đã setup xong — vào menu"
+  main_menu; exit 0
+fi
+
+# ── FIRST RUN: TỰ ĐỘNG 6 BƯỚC ─────────────────────────────────────
+echo -e "${W}  Lần đầu: tự động setup — không cần thao tác thêm${N}\n"
+
+echo -e "${W}━━━ BƯỚC 1/6: Cài packages ━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_packages; echo ""
+
+echo -e "${W}━━━ BƯỚC 2/6: Tải RAR từ Google Drive (~2.2GB) ━━━${N}"
+step_download_rar || { err "Tải thất bại!"; exit 1; }; echo ""
+
+echo -e "${W}━━━ BƯỚC 3/6: Giải nén APK + JARs + SQL ━━━━━━━━━${N}"
+step_extract; echo ""
+
+echo -e "${W}━━━ BƯỚC 4/6: Ký APK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+step_sign_apk; echo ""
+
+echo -e "${W}━━━ BƯỚC 5/6: Setup MariaDB + import SQL ━━━━━━━━━${N}"
+step_mariadb; echo ""
+
+echo -e "${W}━━━ BƯỚC 6/6: Tạo launcher start/stop ━━━━━━━━━━━${N}"
+step_create_launcher; echo ""
+
+# Đánh dấu done
+mkdir -p "$NRO_HOME"; date > "$SETUP_FLAG"
+
+echo -e "${G}╔═══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║           CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════╝${N}"
+echo ""
+echo -e "  ${Y}APK game:${N}     $APK_OUT"
+echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
+echo ""
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Hashirama.apk${N}"
+echo -e "  2. Chọn ${Y}[1] Start Server${N} trong menu bên dưới"
+echo -e "  3. Mở game → đăng nhập → chơi!"
+echo ""
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
+main_menu
+\e[1;32m[Enter]...\e[0m' _;;
       0) break;;
     esac
   done
