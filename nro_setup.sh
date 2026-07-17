@@ -92,13 +92,17 @@ try:
         print("[!] Không tìm thấy IP cũ (có thể đã patch rồi)")
 
     with zipfile.ZipFile(src, 'r') as zin, \
-         zipfile.ZipFile(dst, 'w', zipfile.ZIP_STORED, allowZip64=True) as zout:
+         zipfile.ZipFile(dst, 'w', allowZip64=True) as zout:
         for item in zin.infolist():
             if item.filename.startswith('META-INF/'):
                 continue
             data = meta_new if item.filename == META else zin.read(item.filename)
-            info = zipfile.ZipInfo(item.filename)
-            zout.writestr(info, data)
+            # Giữ nguyên compression gốc (STORED hoặc DEFLATED)
+            new_info = zipfile.ZipInfo(item.filename)
+            new_info.compress_type = item.compress_type
+            new_info.date_time = item.date_time
+            new_info.external_attr = item.external_attr
+            zout.writestr(new_info, data)
     print(f"[✓] APK patched → {dst}")
 
 except Exception as e:
@@ -156,21 +160,37 @@ copy_apk_sdcard() {
     fi
 }
 
-# ── Sign APK bằng debug key ──────────────────────
+# ── Sign APK: v1+v2 (apksigner) hoặc fallback jarsigner ─
 sign_apk() {
     local apk="$1"
     local ks="$DIR/debug.keystore"
     info "Đang sign APK..."
+
+    # Tạo keystore nếu chưa có
     if [ ! -f "$ks" ]; then
         keytool -genkeypair -alias nro -keyalg RSA -keysize 2048 -validity 10000 \
             -keystore "$ks" -storepass nro12345 -keypass nro12345 \
             -dname "CN=NRO,O=Private,C=VN" 2>/dev/null
     fi
-    local tmp="${apk%.apk}-signed.apk"
-    jarsigner -keystore "$ks" -storepass nro12345 -keypass nro12345 \
-        -sigalg SHA256withRSA -digestalg SHA-256 \
-        -signedjar "$tmp" "$apk" nro 2>/dev/null && mv "$tmp" "$apk"
-    ok "APK signed"
+
+    if command -v apksigner >/dev/null 2>&1; then
+        # apksigner: v1 + v2 signature → Android 7+ chấp nhận
+        apksigner sign \
+            --ks "$ks" \
+            --ks-pass pass:nro12345 \
+            --key-pass pass:nro12345 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            "$apk" 2>/dev/null
+        ok "APK signed (v1+v2 — apksigner)"
+    else
+        # fallback jarsigner (chỉ v1, Android 6 trở xuống)
+        local tmp="${apk%.apk}-signed.apk"
+        jarsigner -keystore "$ks" -storepass nro12345 -keypass nro12345 \
+            -sigalg SHA256withRSA -digestalg SHA-256 \
+            -signedjar "$tmp" "$apk" nro 2>/dev/null && mv "$tmp" "$apk"
+        warn "Signed v1 only (apksigner chưa cài) — có thể lỗi Android 7+"
+    fi
 }
 
 # ── Cài môi trường ───────────────────────────────
@@ -178,9 +198,9 @@ install_env() {
     echo ""
     info "Cập nhật pkg..."
     pkg update -y -o Dpkg::Options::="--force-confold" >/dev/null 2>&1
-    info "Cài Java + MariaDB..."
-    pkg install -y openjdk-17 mariadb wget >/dev/null 2>&1
-    ok "Java + MariaDB + wget OK"
+    info "Cài Java + MariaDB + apksigner..."
+    pkg install -y openjdk-17 mariadb wget apksigner >/dev/null 2>&1
+    ok "Java + MariaDB + wget + apksigner OK"
 }
 
 # ── Khởi động MariaDB ────────────────────────────
