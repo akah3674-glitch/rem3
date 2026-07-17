@@ -27,15 +27,23 @@ err()  { echo -e "${R}  ✗${N}  $1"; }
 warn() { echo -e "${Y}  !${N}  $1"; }
 info() { echo -e "${B}  →${N}  $1"; }
 
-# ── Tiêu đề ──────────────────────────────────────
+# ── Tiêu đề + trạng thái (tính HẾT trước, clear sau → không nháy) ───
 banner() {
-    # Tính trạng thái TRƯỚC khi xóa màn hình → tránh nháy (frame trắng)
-    local sv_label sv_color
-    if pgrep -f Srcgame.jar >/dev/null 2>&1 && pgrep -f ServerLogin.jar >/dev/null 2>&1; then
+    # Bước 1: thu thập dữ liệu (chậm) TRƯỚC KHI xóa màn hình
+    local db_st game_st login_st sv_label sv_color
+    mysqladmin ping -u root --silent --connect-timeout=1 >/dev/null 2>&1 \
+        && db_st="${G}●${N}" || db_st="${R}●${N}"
+    pgrep -f Srcgame.jar     >/dev/null 2>&1 \
+        && game_st="${G}●${N}"  || game_st="${R}●${N}"
+    pgrep -f ServerLogin.jar >/dev/null 2>&1 \
+        && login_st="${G}●${N}" || login_st="${R}●${N}"
+    if [[ "$game_st" == "${G}●${N}" && "$login_st" == "${G}●${N}" ]]; then
         sv_label="  ONLINE  "; sv_color="${G}"
     else
         sv_label="  OFFLINE "; sv_color="${R}"
     fi
+
+    # Bước 2: xóa màn hình + in tất cả một lần (không có khoảng trễ sau clear)
     printf '\033[H\033[2J\033[3J'
     echo -e "${C}"
     echo "  ╔══════════════════════════════════════════╗"
@@ -43,17 +51,12 @@ banner() {
     echo "  ║     Private Server • Chơi 1 mình         ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${N}"
-}
-
-# ── Trạng thái nhanh ─────────────────────────────
-status_bar() {
-    local db_st game_st login_st
-    mysqladmin ping -u root --silent >/dev/null 2>&1 && db_st="${G}●${N}" || db_st="${R}●${N}"
-    pgrep -f Srcgame.jar    >/dev/null 2>&1 && game_st="${G}●${N}"  || game_st="${R}●${N}"
-    pgrep -f ServerLogin.jar >/dev/null 2>&1 && login_st="${G}●${N}" || login_st="${R}●${N}"
     echo -e "  DB $db_st  Login $login_st  Game $game_st   ${Y}IP: 127.0.0.1${N}"
     echo ""
 }
+
+# ── status_bar đã gộp vào banner() — giữ stub để không lỗi nếu còn gọi ──
+status_bar() { :; }
 
 # ── Tải file với wget (resume được) ──────────────
 download_file() {
