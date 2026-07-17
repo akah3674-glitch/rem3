@@ -396,6 +396,10 @@ do_start() {
 
     start_db || { read -rp "  Enter..."; return; }
 
+    # Fix schema: đảm bảo email có default dù DB cũ hay mới
+    mysql -u root hashirama -e \
+        "ALTER TABLE account MODIFY COLUMN email VARCHAR(255) NOT NULL DEFAULT '';" 2>/dev/null || true
+
     # Hàm chờ port mở (tối đa wait_sec giây)
     wait_port() {
         local port="$1" label="$2" wait_sec="${3:-15}"
