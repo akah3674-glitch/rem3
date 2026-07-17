@@ -29,7 +29,8 @@ info() { echo -e "${B}  →${N}  $1"; }
 
 # ── Tiêu đề ──────────────────────────────────────
 banner() {
-    clear
+    # Dùng cursor-home thay clear để không gây flash
+    printf '\033[H\033[2J\033[3J'
     echo -e "${C}"
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║        NRO HASHIRAMA — OFFLINE           ║"
@@ -41,7 +42,7 @@ banner() {
 # ── Trạng thái nhanh ─────────────────────────────
 status_bar() {
     local db_st game_st login_st
-    mysqladmin ping -u root --silent 2>/dev/null && db_st="${G}●${N}" || db_st="${R}●${N}"
+    mysqladmin ping -u root --silent >/dev/null 2>&1 && db_st="${G}●${N}" || db_st="${R}●${N}"
     pgrep -f Srcgame.jar    >/dev/null 2>&1 && game_st="${G}●${N}"  || game_st="${R}●${N}"
     pgrep -f ServerLogin.jar >/dev/null 2>&1 && login_st="${G}●${N}" || login_st="${R}●${N}"
     echo -e "  DB $db_st  Login $login_st  Game $game_st   ${Y}IP: 127.0.0.1${N}"
@@ -135,7 +136,7 @@ install_env() {
 
 # ── Khởi động MariaDB ────────────────────────────
 start_db() {
-    if mysqladmin ping -u root --silent 2>/dev/null; then
+    if mysqladmin ping -u root --silent >/dev/null 2>&1; then
         ok "MariaDB đang chạy"
         return 0
     fi
@@ -147,7 +148,7 @@ start_db() {
         >/dev/null 2>&1 &
     disown
     local tries=0
-    while ! mysqladmin ping -u root --silent 2>/dev/null; do
+    while ! mysqladmin ping -u root --silent >/dev/null 2>&1; do
         sleep 2; tries=$((tries+1))
         [ $tries -ge 15 ] && { err "MariaDB không khởi động được!"; return 1; }
     done
@@ -354,7 +355,7 @@ do_status() {
     echo -e "  ${C}════ TRẠNG THÁI ════${N}"
     echo ""
 
-    mysqladmin ping -u root --silent 2>/dev/null \
+    mysqladmin ping -u root --silent >/dev/null 2>&1 \
         && ok "MariaDB: ĐANG CHẠY" || err "MariaDB: TẮT"
     pgrep -f ServerLogin.jar >/dev/null 2>&1 \
         && ok "Login server: ĐANG CHẠY (port 8888)" || err "Login server: TẮT"
@@ -432,7 +433,7 @@ admin_menu() {
         banner
         echo -e "  ${W}══════ ADMIN TOOL ══════${N}"
         echo ""
-        mysqladmin ping -u root --silent 2>/dev/null \
+        mysqladmin ping -u root --silent >/dev/null 2>&1 \
             && echo -e "  ${G}● DB: Online${N}" \
             || echo -e "  ${R}● DB: Offline — chạy [2] Bật server trước${N}"
         echo ""
@@ -510,7 +511,7 @@ do_reset_data() {
     warn "Xoá toàn bộ dữ liệu game (account + nhân vật)?"
     read -rp "  Gõ 'yes' để xác nhận: " confirm
     if [ "$confirm" = "yes" ]; then
-        mysqladmin ping -u root --silent 2>/dev/null || start_db
+        mysqladmin ping -u root --silent >/dev/null 2>&1 || start_db
         mysql -u root 2>/dev/null <<SQL
 DROP DATABASE IF EXISTS hashirama;
 CREATE DATABASE hashirama CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -563,7 +564,7 @@ main_menu() {
             6) admin_menu ;;
             7) do_reset_data ;;
             0) echo ""; exit 0 ;;
-            *) warn "Chọn lại"; sleep 1 ;;
+            *) ;;
         esac
     done
 }
