@@ -206,8 +206,48 @@ do_full_setup() {
         ok "APK đã có ($(du -sh $apk_raw | cut -f1))"
     fi
 
+    # Patch IP → 127.0.0.1
+    info "Patch IP server → 127.0.0.1 ..."
+    local apk_patched="$DIR/Hashirama-patched.apk"
+    python3 - "$apk_raw" "$apk_patched" <<'PY'
+import sys, zipfile, os
+src, dst = sys.argv[1], sys.argv[2]
+META = 'assets/bin/Data/Managed/Metadata/global-metadata.dat'
+OLD  = b'gatewayhashirama.nroacademy.online'   # 35 bytes
+NEW  = b'127.0.0.1' + b'\x00' * (len(OLD) - len(b'127.0.0.1'))
+
+with zipfile.ZipFile(src, 'r') as zin:
+    if META not in zin.namelist():
+        print("[!] Không tìm thấy metadata, copy thẳng")
+        import shutil; shutil.copy2(src, dst); sys.exit(0)
+    meta = zin.read(META)
+
+if OLD in meta:
+    meta_new = meta.replace(OLD, NEW, 1)
+    print(f"[✓] Đã thay IP: {OLD.rstrip(b'chr(0)')} → 127.0.0.1")
+else:
+    meta_new = meta
+    print("[!] Không tìm thấy IP cũ (có thể đã patch)")
+
+with zipfile.ZipFile(src,'r') as zin, \
+     zipfile.ZipFile(dst,'w',zipfile.ZIP_STORED,allowZip64=True) as zout:
+    for item in zin.infolist():
+        if item.filename.startswith('META-INF/'): continue
+        data = meta_new if item.filename == META else zin.read(item.filename)
+        zout.writestr(zipfile.ZipInfo(item.filename), data)
+print(f"[✓] APK patched: {dst}")
+PY
+
+    if [ -s "$apk_patched" ]; then
+        cp "$apk_patched" "$APK_OUT"
+        rm -f "$apk_patched"
+        ok "Patch IP OK"
+    else
+        warn "Patch thất bại, dùng APK gốc"
+        cp "$apk_raw" "$APK_OUT"
+    fi
+
     # Sign APK
-    cp "$apk_raw" "$APK_OUT"
     sign_apk "$APK_OUT"
     rm -f "$apk_raw"
 
