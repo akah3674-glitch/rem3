@@ -82,8 +82,18 @@ import sys, zipfile, shutil
 
 src, dst = sys.argv[1], sys.argv[2]
 META = 'assets/bin/Data/Managed/Metadata/global-metadata.dat'
-OLD  = b'gatewayhashirama.nroacademy.online'   # 35 bytes
-NEW  = b'127.0.0.1' + b'\x00' * (len(OLD) - len(b'127.0.0.1'))
+
+# Patch 1: Toàn bộ server entry (quan trọng: thay đúng format host:port)
+# SAI: chỉ thay hostname → null bytes cắt mất ":14445"
+# ĐÚNG: thay cả entry, null padding ở CUỐI
+OLD1 = b'Hashirama:gatewayhashirama.nroacademy.online:14445:0,0,0'  # 56 bytes
+_r1  = b'Hashirama:127.0.0.1:14445:0,0,0'
+NEW1 = _r1 + b'\x00' * (len(OLD1) - len(_r1))
+
+# Patch 2: Break gateway URL nrohashirama.online → domain không tồn tại
+# Để game không fetch được server công cộng, phải dùng fallback 127.0.0.1
+OLD2 = b'nrohashirama.online'   # 19 bytes
+NEW2 = b'nrohashirama.local.'   # 19 bytes — DNS fail, game skip qua
 
 try:
     with zipfile.ZipFile(src, 'r') as zin:
@@ -93,20 +103,26 @@ try:
             sys.exit(0)
         meta = zin.read(META)
 
-    if OLD in meta:
-        meta_new = meta.replace(OLD, NEW, 1)
-        print("[✓] Đã thay IP gatewayhashirama.nroacademy.online → 127.0.0.1")
+    patched = False
+    if OLD1 in meta:
+        meta = meta.replace(OLD1, NEW1, 1)
+        print("[✓] Patch server entry: Hashirama → 127.0.0.1:14445")
+        patched = True
     else:
-        meta_new = meta
-        print("[!] Không tìm thấy IP cũ (có thể đã patch rồi)")
+        print("[!] Server entry không tìm thấy (có thể đã patch rồi)")
+
+    if OLD2 in meta:
+        meta = meta.replace(OLD2, NEW2, 1)
+        print("[✓] Patch gateway URL: nrohashirama.online → nrohashirama.local.")
+    else:
+        print("[!] Gateway URL không tìm thấy (có thể đã patch rồi)")
 
     with zipfile.ZipFile(src, 'r') as zin, \
          zipfile.ZipFile(dst, 'w', allowZip64=True) as zout:
         for item in zin.infolist():
             if item.filename.startswith('META-INF/'):
                 continue
-            data = meta_new if item.filename == META else zin.read(item.filename)
-            # Giữ nguyên compression gốc (STORED hoặc DEFLATED)
+            data = meta if item.filename == META else zin.read(item.filename)
             new_info = zipfile.ZipInfo(item.filename)
             new_info.compress_type = item.compress_type
             new_info.date_time = item.date_time
