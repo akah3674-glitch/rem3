@@ -242,6 +242,10 @@ FLUSH PRIVILEGES;
 SQL
     ok "Database 'hashirama' OK"
 
+    # Đảm bảo cột email có default (tránh lỗi INSERT khi tạo tài khoản)
+    mysql -u root hashirama -e \
+        "ALTER TABLE account MODIFY COLUMN email VARCHAR(255) NOT NULL DEFAULT '';" 2>/dev/null || true
+
     # Import SQL nếu chưa có bảng
     local tables
     tables=$(mysql -u root hashirama -e "SHOW TABLES;" 2>/dev/null | wc -l)
@@ -564,7 +568,7 @@ admin_menu() {
                 h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
                 # Dùng _dbe để lỗi SQL hiện rõ (trùng username, bảng sai, v.v.)
                 local result
-                result=$(_dbe "INSERT INTO account (username, password) VALUES ('$u','$h');")
+                result=$(_dbe "INSERT INTO account (username, password, email) VALUES ('$u','$h','$u@nro.local');")
                 if echo "$result" | grep -qi "error\|ERROR"; then
                     err "Tạo tài khoản thất bại:"
                     echo "$result"
