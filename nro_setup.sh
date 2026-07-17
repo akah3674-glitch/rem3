@@ -5,7 +5,7 @@
 # ║   Chạy: bash nro_setup.sh                                       ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-set -euo pipefail
+# KHÔNG dùng set -e để tránh crash ngoài ý muốn
 
 # ─── màu ──────────────────────────────────────────────────────────
 R='\033[1;31m' G='\033[1;32m' Y='\033[1;33m'
@@ -15,7 +15,6 @@ ok()  { echo -e "${G}[✓]${N} $*"; }
 err() { echo -e "${R}[✗]${N} $*"; }
 inf() { echo -e "${B}[i]${N} $*"; }
 wrn() { echo -e "${Y}[!]${N} $*"; }
-die() { err "$*"; exit 1; }
 
 # ─── cấu hình ─────────────────────────────────────────────────────
 NRO_HOME="$HOME/nro-server"
@@ -26,11 +25,13 @@ PATCH_IP="127.0.0.1"
 PATCH_PORT="14445"
 DB_NAME="nro"
 DB_USER="root"
-DB_PASS=""   # MariaDB root không cần pass mặc định trong Termux
+DB_PASS=""
 
 KEYSTORE="$HOME/.nro_sign.keystore"
 KEY_ALIAS="nrosign"
 KEY_PASS="nro12345"
+
+SETUP_FLAG="$NRO_HOME/.setup_done"
 
 banner() {
   clear
@@ -47,79 +48,93 @@ banner() {
 }
 
 # ══════════════════════════════════════════════════════════════════
-# BƯỚC 1: Cài packages cần thiết
+# BƯỚC 1: Cài packages
 # ══════════════════════════════════════════════════════════════════
 step_packages() {
   inf "Cập nhật pkg list..."
-  pkg update -y 2>/dev/null | tail -2 || true
+  pkg update -y 2>/dev/null || true
 
-  inf "Cài packages cần thiết..."
-  pkg install -y \
-    curl wget python python-pip \
-    openjdk-17 mariadb \
-    openssl zip unzip \
-    termux-tools 2>/dev/null | grep -E "^(Install|Unpacking|Setting)" || true
+  inf "Cài packages (có thể mất vài phút)..."
+  pkg install -y curl wget python python-pip openjdk-17 mariadb openssl zip unzip 2>&1 | grep -E "^(Setting up|Err|E:)" || true
 
-  # pip packages
-  inf "Cài pip packages..."
-  pip install -q gdown requests 2>/dev/null || true
+  inf "Cài pip packages (gdown)..."
+  pip3 install -q gdown 2>/dev/null || pip install -q gdown 2>/dev/null || true
 
-  ok "Packages OK"
+  ok "Packages xong!"
 }
 
 # ══════════════════════════════════════════════════════════════════
 # BƯỚC 2: Setup MariaDB
 # ══════════════════════════════════════════════════════════════════
 step_mariadb() {
-  inf "Khởi tạo MariaDB..."
-  mkdir -p "$NRO_HOME/db-data"
+  mkdir -p "$NRO_HOME"
 
-  # Kiểm tra đã init chưa
+  # Init data dir nếu chưa có
   if [[ ! -d "$PREFIX/var/lib/mysql/mysql" ]]; then
-    mysql_install_db --datadir="$PREFIX/var/lib/mysql" 2>/dev/null | tail -3 || true
-    ok "MariaDB data dir đã tạo"
+    inf "Khởi tạo MariaDB data dir..."
+    mysql_install_db 2>&1 | tail -5 || true
+    ok "MariaDB init xong"
   else
-    ok "MariaDB đã được khởi tạo trước đó"
+    ok "MariaDB đã init trước đó"
   fi
 
-  # Start MariaDB nền
+  # Kill instance cũ nếu có
+  pkill mysqld 2>/dev/null || true
+  pkill mysqld_safe 2>/dev/null || true
+  sleep 2
+
+  # Start MariaDB
   inf "Khởi động MariaDB..."
-  # Dừng nếu đang chạy
-  mysqladmin -u root shutdown 2>/dev/null || true
-  sleep 1
-  # Start background
-  mysqld_safe --datadir="$PREFIX/var/lib/mysql" \
-    --socket="$PREFIX/tmp/mysql.sock" \
-    --pid-file="$PREFIX/tmp/mysqld.pid" \
-    --log-error="$PREFIX/tmp/mysqld.err" \
-    --skip-networking=0 \
-    --bind-address=127.0.0.1 \
-    --port=3306 &>/dev/null &
-  MYSQLD_PID=$!
-  disown $MYSQLD_PID 2>/dev/null || true
+  mysqld_safe --user="$(whoami)" 2>/dev/null &
+  MYSQLD_BG=$!
+  disown $MYSQLD_BG 2>/dev/null || true
 
-  # Chờ MariaDB sẵn sàng
-  inf "Chờ MariaDB khởi động..."
-  local tries=0
-  while ! mysqladmin -u root ping &>/dev/null; do
+  # Chờ tối đa 30 giây
+  local i=0
+  local ok_flag=0
+  while [[ $i -lt 30 ]]; do
     sleep 1
-    tries=$((tries+1))
-    [[ $tries -ge 20 ]] && die "MariaDB không khởi động được! Xem log: $PREFIX/tmp/mysqld.err"
+    i=$((i+1))
+    if mysqladmin -u root ping 2>/dev/null | grep -q "alive"; then
+      ok_flag=1
+      break
+    fi
+    # Thử cách khác
+    if mysql -u root -e "SELECT 1;" 2>/dev/null | grep -q "1"; then
+      ok_flag=1
+      break
+    fi
+    echo -ne "  Chờ MariaDB... ${i}s\r"
   done
-  ok "MariaDB đang chạy"
+  echo ""
 
-  # Tạo database NRO
+  if [[ $ok_flag -eq 0 ]]; then
+    wrn "MariaDB chưa phản hồi sau 30s — thử tiếp..."
+    # Có thể đã chạy nhưng socket khác
+    if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+      ok_flag=1
+    fi
+  fi
+
+  if [[ $ok_flag -eq 1 ]]; then
+    ok "MariaDB đang chạy!"
+  else
+    err "MariaDB không khởi động được"
+    wrn "Tiếp tục... (có thể setup DB sau)"
+    return 0
+  fi
+
+  # Tạo database
   inf "Tạo database '$DB_NAME'..."
-  mysql -u root -e "
-    CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-    GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO 'root'@'localhost';
-    FLUSH PRIVILEGES;
-  " 2>/dev/null || wrn "DB có thể đã tồn tại"
+  mysql -u root 2>/dev/null << SQLEOF || true
+CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO 'root'@'localhost';
+GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO 'root'@'127.0.0.1';
+FLUSH PRIVILEGES;
+SQLEOF
 
-  # Tạo schema cơ bản nếu chưa có
-  mysql -u root "$DB_NAME" -e "SHOW TABLES;" 2>/dev/null | grep -q "account" 2>/dev/null || {
-    inf "Tạo schema cơ bản..."
-    mysql -u root "$DB_NAME" << 'SQLEOF'
+  # Schema
+  mysql -u root "$DB_NAME" 2>/dev/null << 'SQLEOF' || true
 CREATE TABLE IF NOT EXISTS account (
   id          INT PRIMARY KEY AUTO_INCREMENT,
   username    VARCHAR(50) UNIQUE NOT NULL,
@@ -137,25 +152,14 @@ CREATE TABLE IF NOT EXISTS nro_character (
   exp         BIGINT DEFAULT 0,
   gold        BIGINT DEFAULT 0,
   gem         INT DEFAULT 0,
-  class       TINYINT DEFAULT 0,
   map_id      INT DEFAULT 1,
   pos_x       INT DEFAULT 0,
   pos_y       INT DEFAULT 0,
-  created_at  DATETIME DEFAULT NOW(),
-  FOREIGN KEY (account_id) REFERENCES account(id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
-CREATE TABLE IF NOT EXISTS nro_item (
-  id          INT PRIMARY KEY AUTO_INCREMENT,
-  char_id     INT,
-  item_id     INT,
-  quantity    INT DEFAULT 1,
-  slot        INT DEFAULT -1,
-  FOREIGN KEY (char_id) REFERENCES nro_character(id) ON DELETE CASCADE
+  created_at  DATETIME DEFAULT NOW()
 ) ENGINE=InnoDB;
 SQLEOF
-    ok "Schema OK"
-  }
+
+  ok "Database '$DB_NAME' sẵn sàng"
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -163,69 +167,69 @@ SQLEOF
 # ══════════════════════════════════════════════════════════════════
 step_download_apk() {
   local apk_raw="/tmp/nro_original.apk"
+  local success=0
 
-  inf "Tải APK gốc từ Google Drive..."
+  inf "Tải APK từ Google Drive (ID: $GDRIVE_ID)..."
 
-  # Thử gdown trước (xử lý xác nhận tự động)
-  if python3 -m gdown --version &>/dev/null 2>&1 || python3 -c "import gdown" &>/dev/null 2>&1; then
+  # Thử gdown
+  if python3 -c "import gdown" 2>/dev/null; then
+    inf "Dùng gdown..."
     python3 -c "
 import gdown, sys
-url = 'https://drive.google.com/uc?id=$GDRIVE_ID'
-out = '$apk_raw'
 try:
-    gdown.download(url, out, quiet=False, fuzzy=True)
-    print('OK')
+    gdown.download(id='$GDRIVE_ID', output='$apk_raw', quiet=False, fuzzy=True)
+    print('GDOWN_OK')
 except Exception as e:
-    print(f'ERR:{e}')
+    print('GDOWN_ERR:', e)
     sys.exit(1)
-" && ok "Tải APK xong (gdown)" || _apk_fallback "$apk_raw"
-  else
-    _apk_fallback "$apk_raw"
+" && success=1 || true
   fi
 
-  # Kiểm tra file hợp lệ
-  [[ ! -f "$apk_raw" ]] && die "Tải APK thất bại!"
-  local fsize
-  fsize=$(stat -c%s "$apk_raw" 2>/dev/null || stat -f%z "$apk_raw" 2>/dev/null || echo 0)
-  [[ "$fsize" -lt 100000 ]] && die "File APK có vẻ không hợp lệ (quá nhỏ: ${fsize} bytes)!"
-  ok "APK gốc: $(du -h "$apk_raw" | cut -f1)"
+  # Fallback: curl trực tiếp
+  if [[ $success -eq 0 ]]; then
+    wrn "gdown thất bại, thử curl..."
+    local CFILE="/tmp/gdrive_c.txt"
 
+    # Lấy confirm token
+    curl -sc "$CFILE" \
+      "https://drive.google.com/uc?export=download&id=$GDRIVE_ID" \
+      -o /tmp/gd_check.html 2>/dev/null || true
+
+    local CONFIRM
+    CONFIRM=$(grep -oP '(?<=confirm=)[^&"]+' /tmp/gd_check.html 2>/dev/null | head -1 || echo "t")
+    [[ -z "$CONFIRM" ]] && CONFIRM="t"
+
+    inf "Confirm token: $CONFIRM"
+    curl -Lb "$CFILE" \
+      "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=$GDRIVE_ID" \
+      --progress-bar -o "$apk_raw" 2>&1 || true
+
+    [[ -f "$apk_raw" ]] && [[ $(stat -c%s "$apk_raw" 2>/dev/null || echo 0) -gt 100000 ]] && success=1
+  fi
+
+  if [[ $success -eq 0 ]] || [[ ! -f "$apk_raw" ]]; then
+    err "Tải APK thất bại!"
+    wrn "Kiểm tra kết nối mạng và thử lại."
+    return 1
+  fi
+
+  local sz
+  sz=$(du -h "$apk_raw" 2>/dev/null | cut -f1)
+  ok "APK tải xong: $sz"
   echo "$apk_raw"
 }
 
-_apk_fallback() {
-  local out="$1"
-  wrn "gdown thất bại, thử curl..."
-  # Lấy confirm token
-  local COOKIE_FILE="/tmp/gdrive_cookie.txt"
-  local CONFIRM
-  curl -sc "$COOKIE_FILE" \
-    "https://drive.google.com/uc?export=download&id=$GDRIVE_ID" \
-    -o /tmp/gdrive_check.html 2>/dev/null
-  CONFIRM=$(grep -oP '(?<=confirm=)[^&"]+' /tmp/gdrive_check.html 2>/dev/null | head -1)
-  if [[ -n "$CONFIRM" ]]; then
-    curl -Lb "$COOKIE_FILE" \
-      "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=$GDRIVE_ID" \
-      -o "$out" --progress-bar 2>&1 | tail -3
-  else
-    # Drive v2 API style
-    curl -L \
-      "https://drive.google.com/uc?export=download&id=$GDRIVE_ID&confirm=t&uuid=$(date +%s)" \
-      -o "$out" --progress-bar 2>&1 | tail -3
-  fi
-}
-
 # ══════════════════════════════════════════════════════════════════
-# BƯỚC 4: Patch APK (thay IP → 127.0.0.1)
+# BƯỚC 4: Patch APK (IP → 127.0.0.1)
 # ══════════════════════════════════════════════════════════════════
 step_patch_apk() {
   local apk_in="$1"
   local apk_out="/tmp/nro_patched.apk"
 
-  inf "Patch IP → ${PATCH_IP}:${PATCH_PORT} ..."
+  inf "Patch IP → ${PATCH_IP}:${PATCH_PORT} trong APK..."
 
   python3 << PYEOF
-import sys, zipfile, shutil, re, os
+import sys, zipfile, re, os
 
 apk_in   = "$apk_in"
 apk_out  = "$apk_out"
@@ -242,107 +246,99 @@ def find_meta(zin):
     for p in META_PATHS:
         if p in names:
             return p
-    # fallback
     cands = [n for n in names if "global-metadata" in n.lower()]
     return cands[0] if cands else None
 
 def patch_data(data, new_ip, new_port):
-    patched = False
-
-    # Pattern 1: Host:IP:Port:0,0,0  (Hashirama / DragonBoy style)
-    def replace_host(m):
-        nonlocal patched
+    # Pattern: <prefix>:<old_ip>:<port>:<suffix>
+    def repl(m):
         orig = m.group(0)
-        # Thay phần IP và port
-        old_ip_part  = m.group(2)
-        old_port_part = m.group(3)
         new_part = m.group(1) + new_ip.encode() + b':' + str(new_port).encode() + m.group(4)
         if len(new_part) <= len(orig):
-            new_part += b'\x00' * (len(orig) - len(new_part))
-            patched = True
+            new_part += b'\\x00' * (len(orig) - len(new_part))
             return new_part
         return orig
 
     data2 = re.sub(
-        rb'([A-Za-z]{3,20}:)([\d\.a-z\-]+)(?::)(\d{4,5})(:[\d,]*)',
-        replace_host, data
+        rb'([A-Za-z]{2,20}:)([\d\.a-z\-]+)(:\d{4,5})(:[\d,]*)',
+        repl, data
     )
     if data2 != data:
-        print(f"  [✓] Pattern Hashirama/Host:IP:Port match OK")
         return data2, True
 
-    # Pattern 2: IP thô trong binary
-    known_ips = [
-        b"dragonboy.vn", b"server.dragonboy.vn",
-        b"ngocrongonline.vn", b"gateway.nro",
-        b"nroacademy.online", b"103.27.",
-        b"103.57.", b"171.244.", b"27.74.",
+    # Fallback: known IP strings
+    known = [
+        b"dragonboy.vn", b"server.dragonboy.vn", b"ngocrongonline.vn",
+        b"103.27.", b"103.57.", b"171.244.", b"27.74.", b"45.119.",
     ]
-    for old in known_ips:
+    for old in known:
         if old in data:
             new = new_ip.encode()
             if len(new) < len(old):
-                new = new + b'\x00' * (len(old) - len(new))
+                new += b'\\x00' * (len(old) - len(new))
             elif len(new) > len(old):
                 continue
-            data2 = data.replace(old, new, 1)
-            print(f"  [✓] Replaced: {old} → {new_ip}")
-            return data2, True
+            return data.replace(old, new, 1), True
 
     return data, False
 
-# ── Mở APK ──
-with zipfile.ZipFile(apk_in, 'r') as zin:
-    meta_path = find_meta(zin)
-    if not meta_path:
-        print("[✗] Không tìm thấy global-metadata.dat trong APK!")
-        sys.exit(1)
-    print(f"  [i] Metadata: {meta_path}")
-    meta_data = zin.read(meta_path)
-
-print(f"  [i] Metadata size: {len(meta_data):,} bytes")
-
-# ── Patch ──
-patched_data, ok = patch_data(meta_data, new_ip, new_port)
-if not ok:
-    print("[!] Không tìm được IP cũ để thay. Ghi thẳng...")
-    # Vẫn ghi ra để không thất bại hoàn toàn
-
-# ── Ghi APK mới ──
-print(f"  [i] Ghi APK: {apk_out}")
-with zipfile.ZipFile(apk_in, 'r') as zin, \
-     zipfile.ZipFile(apk_out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zout:
-    for item in zin.infolist():
-        raw = zin.read(item.filename)
-        if item.filename == meta_path:
-            zout.writestr(item, patched_data)
+try:
+    with zipfile.ZipFile(apk_in, 'r') as zin:
+        meta_path = find_meta(zin)
+        if not meta_path:
+            print("[!] Không tìm thấy metadata — ghi APK không patch")
+            meta_path = None
+            meta_data = b""
         else:
-            zout.writestr(item, raw)
+            print(f"  Metadata: {meta_path}")
+            meta_data = zin.read(meta_path)
 
-print(f"[✓] Patch xong → {apk_out}")
+    if meta_path:
+        patched_data, ok = patch_data(meta_data, new_ip, new_port)
+        print(f"  Patch: {'OK' if ok else 'KHÔNG tìm được IP cũ'}")
+    else:
+        patched_data = b""
+        ok = False
+
+    with zipfile.ZipFile(apk_in, 'r') as zin, \
+         zipfile.ZipFile(apk_out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zout:
+        for item in zin.infolist():
+            raw = zin.read(item.filename)
+            if meta_path and item.filename == meta_path:
+                zout.writestr(item, patched_data)
+            else:
+                zout.writestr(item, raw)
+
+    print(f"[OK] APK ghi xong: {apk_out}")
+except Exception as e:
+    print(f"[ERR] {e}")
+    sys.exit(1)
 PYEOF
 
-  [[ ! -f "$apk_out" ]] && die "Patch APK thất bại!"
-  ok "Patch IP xong"
+  if [[ $? -ne 0 ]] || [[ ! -f "$apk_out" ]]; then
+    err "Patch APK thất bại!"
+    return 1
+  fi
+
+  ok "Patch xong"
   echo "$apk_out"
 }
 
 # ══════════════════════════════════════════════════════════════════
-# BƯỚC 5: Ký APK
+# BƯỚC 5: Ký APK + lưu ra Downloads
 # ══════════════════════════════════════════════════════════════════
 step_sign_apk() {
   local apk_in="$1"
 
-  # Tạo keystore nếu chưa có
+  # Tạo keystore
   if [[ ! -f "$KEYSTORE" ]]; then
-    inf "Tạo keystore ký APK..."
+    inf "Tạo keystore..."
     keytool -genkeypair -v \
       -keystore "$KEYSTORE" \
       -alias "$KEY_ALIAS" \
       -keyalg RSA -keysize 2048 -validity 9999 \
-      -dname "CN=NRO Local,O=NRO,C=VN" \
-      -storepass "$KEY_PASS" -keypass "$KEY_PASS" \
-      2>/dev/null && ok "Keystore đã tạo" || wrn "Keystore tạo lỗi nhỏ (bỏ qua)"
+      -dname "CN=NRO,O=NRO,C=VN" \
+      -storepass "$KEY_PASS" -keypass "$KEY_PASS" 2>/dev/null && ok "Keystore OK" || wrn "Keystore lỗi nhỏ"
   fi
 
   inf "Ký APK..."
@@ -350,134 +346,102 @@ step_sign_apk() {
     -keystore "$KEYSTORE" \
     -storepass "$KEY_PASS" -keypass "$KEY_PASS" \
     -digestalg SHA-256 -sigalg SHA256withRSA \
-    "$apk_in" "$KEY_ALIAS" 2>/dev/null && ok "Ký APK OK" || wrn "jarsigner báo lỗi nhỏ"
+    "$apk_in" "$KEY_ALIAS" 2>/dev/null && ok "Ký OK" || wrn "jarsigner có cảnh báo (bỏ qua)"
 
-  # Copy ra Downloads
+  # Lưu ra Downloads
   termux-setup-storage 2>/dev/null || true
   mkdir -p "$APK_DIR"
   cp "$apk_in" "$APK_OUT"
-  ok "APK đã lưu: $APK_OUT"
+  ok "APK đã lưu → $APK_OUT"
 }
 
 # ══════════════════════════════════════════════════════════════════
-# BƯỚC 6: Tạo script start server
+# Tạo launcher start/stop
 # ══════════════════════════════════════════════════════════════════
 step_create_launcher() {
   mkdir -p "$NRO_HOME/bin"
 
-  # Script khởi động server
-  cat > "$NRO_HOME/bin/start.sh" << 'STARTEOF'
+  cat > "$NRO_HOME/bin/start.sh" << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 NRO_HOME="$HOME/nro-server"
-DB_NAME="nro"
-
-R='\033[1;31m' G='\033[1;32m' Y='\033[1;33m' C='\033[1;36m' N='\033[0m'
+G='\033[1;32m' R='\033[1;31m' C='\033[1;36m' Y='\033[1;33m' N='\033[0m'
 ok()  { echo -e "${G}[✓]${N} $*"; }
 err() { echo -e "${R}[✗]${N} $*"; }
 inf() { echo -e "${C}[i]${N} $*"; }
 
-echo -e "${Y}═══════════════════════════════════════${N}"
-echo -e "${Y}   NRO Private Server – Launcher       ${N}"
-echo -e "${Y}═══════════════════════════════════════${N}"
-echo ""
+echo -e "${Y}══════ NRO Server Launcher ══════${N}"
 
-# Khởi động MariaDB nếu chưa chạy
-if ! mysqladmin -u root ping &>/dev/null; then
+# Start MariaDB nếu chưa chạy
+if ! mysqladmin -u root ping 2>/dev/null | grep -q "alive"; then
   inf "Khởi động MariaDB..."
-  mysqld_safe \
-    --datadir="$PREFIX/var/lib/mysql" \
-    --socket="$PREFIX/tmp/mysql.sock" \
-    --pid-file="$PREFIX/tmp/mysqld.pid" \
-    --skip-networking=0 \
-    --bind-address=127.0.0.1 \
-    --port=3306 &>/dev/null &
+  mysqld_safe --user="$(whoami)" 2>/dev/null &
   disown
-  sleep 3
+  sleep 4
 fi
+mysqladmin -u root ping 2>/dev/null | grep -q "alive" && ok "MariaDB: Running" || err "MariaDB: Lỗi"
 
-if mysqladmin -u root ping &>/dev/null; then
-  ok "MariaDB: Running"
-else
-  err "MariaDB không chạy được!"
-fi
-
-# Tìm và khởi động server JAR
-JAR_GAME=$(find "$NRO_HOME" -name "Srcgame.jar" -o -name "game.jar" -o -name "server.jar" 2>/dev/null | head -1)
-JAR_LOGIN=$(find "$NRO_HOME" -name "ServerLogin.jar" -o -name "login.jar" 2>/dev/null | head -1)
+# Tìm và chạy server JAR
+JAR_GAME=$(find "$NRO_HOME" -maxdepth 2 \( -name "Srcgame.jar" -o -name "game.jar" -o -name "server.jar" \) 2>/dev/null | head -1)
+JAR_LOGIN=$(find "$NRO_HOME" -maxdepth 2 \( -name "ServerLogin.jar" -o -name "login.jar" \) 2>/dev/null | head -1)
 
 if [[ -n "$JAR_GAME" ]]; then
-  inf "Khởi động game server: $(basename $JAR_GAME)"
-  java -jar "$JAR_GAME" &
+  inf "Start: $(basename $JAR_GAME)"
+  cd "$(dirname $JAR_GAME)" && java -jar "$JAR_GAME" &
   disown
-  ok "Game Server: Started (PID $!)"
+  ok "Game Server: PID $!"
 else
-  echo ""
   err "Chưa có server JAR!"
   echo "  → Copy Srcgame.jar vào: $NRO_HOME/"
-  echo "  → Copy ServerLogin.jar vào: $NRO_HOME/"
-  echo ""
 fi
 
 if [[ -n "$JAR_LOGIN" ]]; then
-  inf "Khởi động login server: $(basename $JAR_LOGIN)"
-  java -jar "$JAR_LOGIN" &
+  inf "Start: $(basename $JAR_LOGIN)"
+  cd "$(dirname $JAR_LOGIN)" && java -jar "$JAR_LOGIN" &
   disown
   ok "Login Server: Started"
 fi
 
 echo ""
-ok "Server đang chạy. Mở APK trong Downloads → NRO_Local.apk để chơi!"
-STARTEOF
+ok "Mở APK: Downloads/NRO_Local.apk để chơi!"
+EOF
   chmod +x "$NRO_HOME/bin/start.sh"
 
-  # Script stop server
-  cat > "$NRO_HOME/bin/stop.sh" << 'STOPEOF'
+  cat > "$NRO_HOME/bin/stop.sh" << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
-echo "Dừng server..."
-pkill -f "Srcgame.jar" 2>/dev/null && echo "[✓] Game server dừng" || true
+pkill -f "Srcgame.jar"   2>/dev/null && echo "[✓] Game server dừng"   || true
 pkill -f "ServerLogin.jar" 2>/dev/null && echo "[✓] Login server dừng" || true
-mysqladmin -u root shutdown 2>/dev/null && echo "[✓] MariaDB dừng" || true
-STOPEOF
+mysqladmin -u root shutdown 2>/dev/null && echo "[✓] MariaDB dừng"     || true
+EOF
   chmod +x "$NRO_HOME/bin/stop.sh"
 
-  ok "Launcher tạo tại: $NRO_HOME/bin/start.sh"
+  ok "Launcher: $NRO_HOME/bin/start.sh"
 }
 
 # ══════════════════════════════════════════════════════════════════
-# MENU ADMIN – chạy sau khi setup xong
+# ADMIN MENU
 # ══════════════════════════════════════════════════════════════════
-_mysql() {
-  local sql="$1"
-  mysql -u "$DB_USER" -h 127.0.0.1 "$DB_NAME" -e "$sql" 2>/dev/null
-}
+_mysql() { mysql -u "$DB_USER" -h 127.0.0.1 "$DB_NAME" -e "$1" 2>/dev/null; }
 
 admin_give() {
   local col="$1" label="$2"
   echo ""
   read -p "$(echo -e "${C}Tên nhân vật: ${N}")" cname
   read -p "$(echo -e "${C}Số $label: ${N}")" amount
-  local exist
-  exist=$(_mysql "SELECT COUNT(*) FROM nro_character WHERE name='$cname';" 2>/dev/null | tail -1)
+  local exist; exist=$(_mysql "SELECT COUNT(*) FROM nro_character WHERE name='$cname';" 2>/dev/null | tail -1)
   if [[ "$exist" == "0" ]]; then
-    err "Không tìm thấy nhân vật '$cname'!"
+    err "Không tìm thấy '$cname'!"
   else
-    _mysql "UPDATE nro_character SET $col=$col+$amount WHERE name='$cname';" && \
-      ok "Đã nạp $amount $label cho '$cname'!" || err "Thất bại!"
+    _mysql "UPDATE nro_character SET $col=$col+$amount WHERE name='$cname';" && ok "Đã nạp $amount $label cho '$cname'!" || err "Thất bại!"
     _mysql "SELECT name, level, gold, gem FROM nro_character WHERE name='$cname';"
   fi
-  read -p "$(echo -e "${G}[Enter]...${N}")" _
+  read -p $'\e[1;32m[Enter]...\e[0m' _
 }
 
 admin_menu() {
   while true; do
     clear
     echo -e "${W}══════ ADMIN TOOL ══════${N}"
-    echo ""
-    if mysqladmin -u root ping &>/dev/null; then
-      echo -e "  ${G}● DB: Online${N}"
-    else
-      echo -e "  ${R}● DB: Offline (chạy: bash $NRO_HOME/bin/start.sh)${N}"
-    fi
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" && echo -e "  ${G}● DB: Online${N}" || echo -e "  ${R}● DB: Offline${N}"
     echo ""
     echo -e "  ${Y}[1]${N} Nạp VÀNG"
     echo -e "  ${Y}[2]${N} Nạp NGỌC"
@@ -487,52 +451,41 @@ admin_menu() {
     echo -e "  ${Y}[6]${N} Reset mật khẩu"
     echo -e "  ${Y}[7]${N} Ban / Unban"
     echo -e "  ${Y}[8]${N} SQL tuỳ ý"
-    echo -e "  ${Y}[0]${N} Thoát"
+    echo -e "  ${Y}[0]${N} Quay lại"
     echo ""
     read -p "$(echo -e "${C}Chọn: ${N}")" ch
     case "$ch" in
       1) admin_give "gold" "vàng" ;;
       2) admin_give "gem"  "ngọc" ;;
       3) admin_give "exp"  "EXP"  ;;
-      4)
-        echo ""
-        _mysql "SELECT id, name, level, gold, gem, exp FROM nro_character ORDER BY level DESC LIMIT 30;"
-        read -p "$(echo -e "${G}[Enter]...${N}")" _
-        ;;
+      4) echo ""; _mysql "SELECT id, name, level, gold, gem FROM nro_character ORDER BY level DESC LIMIT 30;"; read -p $'\e[1;32m[Enter]...\e[0m' _ ;;
       5)
-        echo ""
         read -p "$(echo -e "${C}Username: ${N}")" u
         read -s -p "$(echo -e "${C}Password: ${N}")" p; echo ""
         local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
-        _mysql "INSERT INTO account (username, password) VALUES ('$u','$h');" && \
-          ok "Tạo tài khoản '$u' OK!" || err "Thất bại (có thể đã tồn tại)"
-        read -p "$(echo -e "${G}[Enter]...${N}")" _
+        _mysql "INSERT INTO account (username, password) VALUES ('$u','$h');" && ok "Tạo '$u' OK!" || err "Thất bại!"
+        read -p $'\e[1;32m[Enter]...\e[0m' _
         ;;
       6)
-        echo ""
         read -p "$(echo -e "${C}Username: ${N}")" u
         read -s -p "$(echo -e "${C}Pass mới: ${N}")" p; echo ""
         local h; h=$(echo -n "$p" | md5sum | cut -d' ' -f1)
         _mysql "UPDATE account SET password='$h' WHERE username='$u';" && ok "OK!" || err "Thất bại!"
-        read -p "$(echo -e "${G}[Enter]...${N}")" _
+        read -p $'\e[1;32m[Enter]...\e[0m' _
         ;;
       7)
-        echo ""
         read -p "$(echo -e "${C}Username: ${N}")" u
         echo -e "  ${Y}[1]${N} Ban  ${Y}[2]${N} Unban"
         read -p "$(echo -e "${C}Chọn: ${N}")" bc
-        [[ "$bc" == "1" ]] && _mysql "UPDATE account SET status=0 WHERE username='$u';" && ok "Đã ban '$u'" || true
-        [[ "$bc" == "2" ]] && _mysql "UPDATE account SET status=1 WHERE username='$u';" && ok "Đã unban '$u'" || true
-        read -p "$(echo -e "${G}[Enter]...${N}")" _
+        [[ "$bc" == "1" ]] && _mysql "UPDATE account SET status=0 WHERE username='$u';" && ok "Ban OK" || true
+        [[ "$bc" == "2" ]] && _mysql "UPDATE account SET status=1 WHERE username='$u';" && ok "Unban OK" || true
+        read -p $'\e[1;32m[Enter]...\e[0m' _
         ;;
       8)
-        echo ""
-        echo -e "${C}Tables:${N}"
-        _mysql "SHOW TABLES;"
-        echo ""
+        _mysql "SHOW TABLES;"; echo ""
         read -p "$(echo -e "${C}SQL: ${N}")" sql
         [[ -n "$sql" ]] && _mysql "$sql"
-        read -p "$(echo -e "${G}[Enter]...${N}")" _
+        read -p $'\e[1;32m[Enter]...\e[0m' _
         ;;
       0) break ;;
     esac
@@ -540,14 +493,18 @@ admin_menu() {
 }
 
 # ══════════════════════════════════════════════════════════════════
-# MAIN MENU (sau khi setup)
+# MAIN MENU
 # ══════════════════════════════════════════════════════════════════
 main_menu() {
   while true; do
     banner
+    mysqladmin -u root ping 2>/dev/null | grep -q "alive" \
+      && echo -e "  ${G}● MariaDB: Online${N}" \
+      || echo -e "  ${Y}● MariaDB: Offline${N}"
+    echo ""
     echo -e "  ${Y}[1]${N} Start Server"
     echo -e "  ${Y}[2]${N} Stop Server"
-    echo -e "  ${Y}[3]${N} Admin Tool (vàng / ngọc / ban...)"
+    echo -e "  ${Y}[3]${N} Admin Tool"
     echo -e "  ${Y}[4]${N} Tải lại APK (patch lại từ Drive)"
     echo -e "  ${Y}[5]${N} Xem log MariaDB"
     echo -e "  ${Y}[0]${N} Thoát"
@@ -558,91 +515,75 @@ main_menu() {
       2) bash "$NRO_HOME/bin/stop.sh";  read -p $'\e[1;32m[Enter]...\e[0m' _ ;;
       3) admin_menu ;;
       4)
-        inf "Tải lại APK..."
-        local apk_raw
-        apk_raw=$(step_download_apk)
-        local apk_pat
-        apk_pat=$(step_patch_apk "$apk_raw")
-        step_sign_apk "$apk_pat"
+        local r; r=$(step_download_apk) && {
+          local p; p=$(step_patch_apk "$r") && step_sign_apk "$p"
+        } || err "Tải APK thất bại!"
         read -p $'\e[1;32m[Enter]...\e[0m' _
         ;;
-      5)
-        tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"
-        read -p $'\e[1;32m[Enter]...\e[0m' _
-        ;;
+      5) tail -30 "$PREFIX/tmp/mysqld.err" 2>/dev/null || err "Không có log"; read -p $'\e[1;32m[Enter]...\e[0m' _ ;;
       0) echo -e "${G}Bye!${N}"; exit 0 ;;
     esac
   done
 }
 
 # ══════════════════════════════════════════════════════════════════
-# ENTRY POINT – Chạy lần đầu = auto setup, lần sau = menu
+# ENTRY POINT
 # ══════════════════════════════════════════════════════════════════
-SETUP_FLAG="$NRO_HOME/.setup_done"
-
 banner
 
 if [[ -f "$SETUP_FLAG" ]]; then
-  # Đã setup → vào menu thẳng
+  inf "Đã setup trước đó — vào menu chính"
   main_menu
   exit 0
 fi
 
-# ─── FIRST RUN: AUTO SETUP ────────────────────────────────────────
-echo -e "${W}  ● Lần đầu chạy – bắt đầu cài đặt tự động${N}"
-echo -e "${W}  ● Quá trình gồm 5 bước, KHÔNG cần thao tác thêm${N}"
-echo ""
-echo -e "${C}  Thời gian ước tính: 5–15 phút (tuỳ mạng)${N}"
-echo ""
-read -p "$(echo -e "${Y}  Nhấn Enter để bắt đầu...${N}")"
+# ─── FIRST RUN ────────────────────────────────────────────────────
+echo -e "${W}  Auto setup – không cần thao tác thêm${N}"
 echo ""
 
-# Bước 1
+# ── Bước 1 ──
 echo -e "${W}━━━ BƯỚC 1/5: Cài packages ━━━━━━━━━━━━━━━━━━━━━━${N}"
 step_packages
-
 echo ""
-# Bước 2
+
+# ── Bước 2 ──
 echo -e "${W}━━━ BƯỚC 2/5: Khởi động MariaDB ━━━━━━━━━━━━━━━━━${N}"
 step_mariadb
-
 echo ""
-# Bước 3
+
+# ── Bước 3 ──
 echo -e "${W}━━━ BƯỚC 3/5: Tải APK từ Google Drive ━━━━━━━━━━━${N}"
-APK_RAW=$(step_download_apk)
-
+APK_RAW=""
+APK_RAW=$(step_download_apk) || { err "Bước 3 thất bại! Kiểm tra mạng."; read -p $'[Enter]...' _; exit 1; }
 echo ""
-# Bước 4
+
+# ── Bước 4 ──
 echo -e "${W}━━━ BƯỚC 4/5: Patch IP → 127.0.0.1 ━━━━━━━━━━━━━━${N}"
-APK_PAT=$(step_patch_apk "$APK_RAW")
-
+APK_PAT=""
+APK_PAT=$(step_patch_apk "$APK_RAW") || { err "Bước 4 thất bại!"; read -p $'[Enter]...' _; exit 1; }
 echo ""
-# Bước 5
+
+# ── Bước 5 ──
 echo -e "${W}━━━ BƯỚC 5/5: Ký APK & tạo launcher ━━━━━━━━━━━━━${N}"
 step_sign_apk "$APK_PAT"
 step_create_launcher
 
-# Đánh dấu setup xong
+# Đánh dấu xong
 mkdir -p "$NRO_HOME"
-touch "$SETUP_FLAG"
-echo "$(date)" > "$SETUP_FLAG"
+date > "$SETUP_FLAG"
 
-# Tổng kết
 echo ""
-echo -e "${G}╔══════════════════════════════════════════════════════╗${N}"
-echo -e "${G}║              CÀI ĐẶT HOÀN TẤT!                      ║${N}"
-echo -e "${G}╚══════════════════════════════════════════════════════╝${N}"
+echo -e "${G}╔══════════════════════════════════════════════════╗${N}"
+echo -e "${G}║          CÀI ĐẶT HOÀN TẤT!                      ║${N}"
+echo -e "${G}╚══════════════════════════════════════════════════╝${N}"
 echo ""
-echo -e "  ${Y}APK game:${N}  $APK_OUT"
+echo -e "  ${Y}APK game:${N}    $APK_OUT"
 echo -e "  ${Y}Start server:${N} bash $NRO_HOME/bin/start.sh"
-echo -e "  ${Y}Script này:${N}  bash nro_setup.sh  (vào menu)"
 echo ""
-echo -e "  ${C}Bước tiếp theo:${N}"
-echo -e "  1. Copy server JAR vào:  ${Y}$NRO_HOME/${N}"
-echo -e "     (Srcgame.jar + ServerLogin.jar)"
-echo -e "  2. Chạy: ${Y}bash $NRO_HOME/bin/start.sh${N}"
-echo -e "  3. Cài APK từ Downloads → ${Y}NRO_Local.apk${N}"
-echo -e "  4. Đăng nhập → chơi!"
+echo -e "  ${C}Bước tiếp:${N}"
+echo -e "  1. Cài APK từ Downloads → ${Y}NRO_Local.apk${N}"
+echo -e "  2. Copy Srcgame.jar + ServerLogin.jar → ${Y}$NRO_HOME/${N}"
+echo -e "  3. Chọn ${Y}[1] Start Server${N} trong menu"
 echo ""
-read -p "$(echo -e "${G}Nhấn Enter để vào menu chính...${N}")"
+read -p "$(echo -e "${G}Nhấn Enter vào menu chính...${N}")"
 main_menu
