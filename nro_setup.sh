@@ -29,14 +29,14 @@ info() { echo -e "${B}  →${N}  $1"; }
 
 # ── Tiêu đề ──────────────────────────────────────
 banner() {
-    printf '\033[H\033[2J\033[3J'
-    # Kiểm tra server thật sự đang chạy không
+    # Tính trạng thái TRƯỚC khi xóa màn hình → tránh nháy (frame trắng)
     local sv_label sv_color
     if pgrep -f Srcgame.jar >/dev/null 2>&1 && pgrep -f ServerLogin.jar >/dev/null 2>&1; then
         sv_label="  ONLINE  "; sv_color="${G}"
     else
         sv_label="  OFFLINE "; sv_color="${R}"
     fi
+    printf '\033[H\033[2J\033[3J'
     echo -e "${C}"
     echo "  ╔══════════════════════════════════════════╗"
     printf "  ║        NRO HASHIRAMA —${sv_color}%s${C}║\n" "$sv_label"
